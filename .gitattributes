@@ -1,0 +1,69 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Unity YAML
+*.unity merge=unityyamlmerge eol=lf
+*.prefab merge=unityyamlmerge eol=lf
+*.asset merge=unityyamlmerge eol=lf
+*.meta merge=unityyamlmerge eol=lf
+*.anim merge=unityyamlmerge eol=lf
+*.controller merge=unityyamlmerge eol=lf
+*.overrideController merge=unityyamlmerge eol=lf
+*.physicMaterial merge=unityyamlmerge eol=lf
+*.physicsMaterial2D merge=unityyamlmerge eol=lf
+*.playable merge=unityyamlmerge eol=lf
+*.mat merge=unityyamlmerge eol=lf
+*.mask merge=unityyamlmerge eol=lf
+*.brush merge=unityyamlmerge eol=lf
+*.flare merge=unityyamlmerge eol=lf
+*.fontsettings merge=unityyamlmerge eol=lf
+*.guiskin merge=unityyamlmerge eol=lf
+*.giparams merge=unityyamlmerge eol=lf
+*.renderTexture merge=unityyamlmerge eol=lf
+*.spriteatlas merge=unityyamlmerge eol=lf
+*.terrainlayer merge=unityyamlmerge eol=lf
+*.mixer merge=unityyamlmerge eol=lf
+*.shadervariants merge=unityyamlmerge eol=lf
+
+# Text / code
+*.cs text eol=lf
+*.shader text eol=lf
+*.cginc text eol=lf
+*.hlsl text eol=lf
+*.compute text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+*.asmdef text eol=lf
+*.asmref text eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.tif binary
+*.tiff binary
+*.tga binary
+*.psd binary
+*.exr binary
+*.gif binary
+*.bmp binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.mp4 binary
+*.mov binary
+*.fbx binary
+*.obj binary
+*.dae binary
+*.3ds binary
+*.blend binary
+*.ttf binary
+*.otf binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.a binary
+*.pdb binary
+*.mdb binary
