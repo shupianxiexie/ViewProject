@@ -5,7 +5,7 @@ using UnityEngine;
 public class PuzzleItem : InteractableItem
 {
     public int puzzleID;
-    private void onTriggerEnter(Collider other)
+    private void OnTriggerEnter(Collider other)
     {
         if (other.CompareTag("Player"))
         {
