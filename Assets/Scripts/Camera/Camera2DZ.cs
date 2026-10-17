@@ -8,6 +8,10 @@ public class Camera2DZ : MonoBehaviour
 
     public Transform player;
 
+    // 切换过渡时由 CameraController 写位置。这里继续跟拍的话，相机会被拉回正视轴。
+    [HideInInspector]
+    public bool suspendFollow;
+
 
     void OnEnable()
     {
@@ -22,12 +26,23 @@ public class Camera2DZ : MonoBehaviour
 
     void LateUpdate()
     {
-        if (player == null)
+        if (suspendFollow || player == null)
         {
             return;
         }
 
-        transform.position = new Vector3(
+        transform.position = GetFollowPosition();
+    }
+
+    // 正视机位。CameraController 用同一个点当贝塞尔终点。
+    public Vector3 GetFollowPosition()
+    {
+        if (player == null || LevelConfig.instance == null)
+        {
+            return transform.position;
+        }
+
+        return new Vector3(
             player.position.x,
             player.position.y + 1f,
             LevelConfig.instance.cameraPosition2DZ

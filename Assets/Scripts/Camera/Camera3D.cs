@@ -20,6 +20,10 @@ public class Camera3D : MonoBehaviour
 
     private Vector2 mousePositionLastFrame;
 
+    // 切换过渡时由 CameraController 写位置。这里继续转的话，贝塞尔轨迹会被盖掉。
+    [HideInInspector]
+    public bool suspendFollow;
+
 
     void Start()
     {
@@ -27,6 +31,13 @@ public class Camera3D : MonoBehaviour
     }
     void LateUpdate()
     {
+        // 鼠标基准点仍要刷新，否则过渡结束那一帧会把这段时间的鼠标位移一次转完。
+        if (suspendFollow)
+        {
+            mousePositionLastFrame = Input.mousePosition;
+            return;
+        }
+
         RotateCamera();
     }
     void RotateCamera()
@@ -55,18 +66,28 @@ public class Camera3D : MonoBehaviour
                 minYRotation,
                 maxYRotation
             );
+        transform.position = GetOrbitPosition();
+        if (player != null)
+        {
+            transform.LookAt(player);
+        }
+    }
+
+    // 过渡飞回 3D 时的终点。必须和上面这套臂长、角度一致，否则交接时会跳一下。
+    public Vector3 GetOrbitPosition()
+    {
+        if (player == null)
+        {
+            return transform.position;
+        }
+
+        float yaw = currentRotationAngleX * Mathf.Deg2Rad;
+        float pitch = currentRotationAngleY * Mathf.Deg2Rad;
         Vector3 offset = new Vector3(
-            armLength *
-            Mathf.Sin(currentRotationAngleY * Mathf.Deg2Rad) *
-            Mathf.Sin(currentRotationAngleX * Mathf.Deg2Rad),
-            armLength *
-            Mathf.Cos(currentRotationAngleY * Mathf.Deg2Rad),
-            armLength *
-            Mathf.Sin(currentRotationAngleY * Mathf.Deg2Rad) *
-            Mathf.Cos(currentRotationAngleX * Mathf.Deg2Rad)
+            armLength * Mathf.Sin(pitch) * Mathf.Sin(yaw),
+            armLength * Mathf.Cos(pitch),
+            armLength * Mathf.Sin(pitch) * Mathf.Cos(yaw)
         );
-        transform.position =
-            player.position + offset;
-        transform.LookAt(player);
+        return player.position + offset;
     }
 }

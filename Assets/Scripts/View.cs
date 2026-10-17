@@ -51,6 +51,12 @@ public class View : MonoBehaviour
 
         if (Input.GetKeyDown(KeyCode.Q) && playerController.turnTo2DX)
         {
+            // 镜头还在飞时不改状态。否则关卡已经压扁或还原，画面却停在半路上。
+            if (IsCameraTransitioning())
+            {
+                return;
+            }
+
             switch (currentState)
             {
                 case State.Version3D:
@@ -64,6 +70,11 @@ public class View : MonoBehaviour
 
         if (Input.GetKeyDown(KeyCode.E) && playerController.turnTo2DZ)
         {
+            if (IsCameraTransitioning())
+            {
+                return;
+            }
+
             switch (currentState)
             {
                 case State.Version3D:
@@ -110,6 +121,13 @@ public class View : MonoBehaviour
         flattenSystem.RestoreFrom2D(State.Version2DZ);
         currentState = State.Version3D;
         SyncCamera();
+    }
+
+    // 过渡途中的 Q/E 直接丢掉，不排队等当前这条飞完。
+    bool IsCameraTransitioning()
+    {
+        CameraController cameraController = FindObjectOfType<CameraController>();
+        return cameraController != null && cameraController.IsTransitioning;
     }
 
     void SyncCamera()

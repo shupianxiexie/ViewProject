@@ -2,6 +2,8 @@ using System.Collections;
 using System.Diagnostics;
 using UnityEngine;
 
+// 这个组件没有接到 Q/E 切换上，场景里改它的时长不会影响现在的镜头过渡。
+// 实际过渡在 CameraController（挂在 CameraManager 上），时长和弯曲程度也在那个 Inspector 里。
 public class CameraTransition : MonoBehaviour
 {
     [Header("摄像机引用")]
