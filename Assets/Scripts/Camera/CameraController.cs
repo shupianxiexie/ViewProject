@@ -119,8 +119,7 @@ public class CameraController : MonoBehaviour
         currentState = state;
         IsTransitioning = true;
         SetSuspendFollow(true);
-        // 压扁在 View 里已经立刻做完。约束也马上换成目标视角，操作不等镜头飞完。
-        ApplyConstraints(state);
+        // 约束先不动。2D 操作、碰撞和遮挡都等镜头飞到，在 ApplyImmediate 里一起提交。
     }
 
     void AdvanceTransition()
@@ -143,7 +142,13 @@ public class CameraController : MonoBehaviour
         }
 
         // 缓动曲线只重映射时间。位置仍然采样下面的二阶贝塞尔，形状不会变成这条 AnimationCurve。
+        // 压扁用同一个 curveT，物体厚度和深度跟镜头一起走。
         float curveT = EvaluateCurve(rawT);
+        if (playerView != null)
+        {
+            playerView.SetFlattenAlongCamera(curveT);
+        }
+
         Vector3 endPosition = GetDesiredPosition(transitionTo);
         Vector3 controlPoint = GetControlPoint(transitionStartPosition, endPosition);
 
@@ -167,6 +172,18 @@ public class CameraController : MonoBehaviour
 
     void ApplyImmediate(View.State state)
     {
+        if (playerView == null && player != null)
+        {
+            playerView = player.GetComponent<View>();
+        }
+
+        // 开场摆相机时没有压扁过渡，OnCameraArrived 会自己空过。
+        // 真正切换时，这里才把外形收到终点，并换上碰撞和操作。
+        if (playerView != null)
+        {
+            playerView.OnCameraArrived();
+        }
+
         currentState = state;
         IsTransitioning = false;
         SetSuspendFollow(false);

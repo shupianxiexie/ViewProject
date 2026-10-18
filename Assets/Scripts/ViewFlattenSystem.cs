@@ -36,20 +36,33 @@ public class ViewFlattenSystem
         public readonly List<Collider> disabledColliders = new List<Collider>();
         public readonly List<Transform> depthScaledChildren = new List<Transform>();
         public readonly List<Vector3> depthScaledChildScales = new List<Vector3>();
+        public Vector3 flatWorldScale = Vector3.one;
+        public Vector3 progressFromScale = Vector3.one;
+        public Vector3 progressToScale = Vector3.one;
+        public float progressFromDepth;
+        public float progressToDepth;
+        public bool driveDepth;
+        public readonly List<Vector3> childScaleFrom = new List<Vector3>();
+        public readonly List<Vector3> childScaleTo = new List<Vector3>();
     }
 
     readonly View view;
     readonly List<Record> records = new List<Record>();
     bool flattened;
+    bool visualAnimating;
+    bool animatingEnter;
+    View.State animState;
 
     public ViewFlattenSystem(View view)
     {
         this.view = view;
     }
 
-    public bool TryEnter2D(View.State state)
+    // 只搭好缩放父节点并记下起点、终点。外形先不变。
+    // 人和箱子在投影上重叠时直接失败，镜头也不会飞。
+    public bool PrepareEnter(View.State state)
     {
-        if (flattened)
+        if (flattened || visualAnimating)
         {
             return false;
         }
@@ -64,22 +77,89 @@ public class ViewFlattenSystem
             {
                 warning.PlayWrong();
             }
+
             return false;
         }
 
         Camera viewCamera = GetViewCamera(state);
         float plane = GetPlaneCoordinate(state);
         plane = ClampPlaneToCamera(viewCamera, state, plane);
+        animState = state;
+        animatingEnter = true;
+        visualAnimating = true;
 
         for (int i = 0; i < records.Count; i++)
         {
-            FlattenRecord(records[i], state, plane, viewCamera);
+            PrepareEnterRecord(records[i], state, plane, viewCamera);
+        }
+
+        return true;
+    }
+
+    // 从已经压扁的状态往回放。起点是现在的扁外形，终点是立体外形。
+    public bool PrepareExit(View.State state)
+    {
+        if (!flattened || visualAnimating)
+        {
+            return false;
+        }
+
+        animState = state;
+        animatingEnter = false;
+        visualAnimating = true;
+
+        for (int i = 0; i < records.Count; i++)
+        {
+            PrepareExitRecord(records[i], state);
+        }
+
+        return true;
+    }
+
+    // t = 0 是这次飞行开始时的外形，t = 1 是飞完后的外形。
+    public void SetVisualProgress(float t)
+    {
+        if (!visualAnimating)
+        {
+            return;
+        }
+
+        t = Mathf.Clamp01(t);
+        for (int i = 0; i < records.Count; i++)
+        {
+            ApplyRecordVisual(records[i], t);
         }
 
         Physics.SyncTransforms();
-        ApplyOcclusion(state);
-        flattened = true;
-        return true;
+    }
+
+    // 镜头到位后调用。进入 2D 时补上碰撞、遮挡和约束；离开时拆掉压扁结构。
+    public void CommitActiveTransition()
+    {
+        if (animatingEnter)
+        {
+            SetVisualProgress(1f);
+            FinishEnterGameplay();
+            visualAnimating = false;
+            animatingEnter = false;
+            // 碰撞已经换成最终形状，再把脚底落到这块表面上。
+            StickPlayerToGround();
+            return;
+        }
+
+        if (!visualAnimating)
+        {
+            return;
+        }
+
+        SetVisualProgress(1f);
+        visualAnimating = false;
+        if (flattened)
+        {
+            RestoreFrom2D(animState);
+        }
+
+        StickPlayerToGround();
     }
 
     public void RestoreFrom2D(View.State state)
@@ -357,64 +437,34 @@ public class ViewFlattenSystem
         return false;
     }
 
-    void FlattenRecord(Record record, View.State state, float plane, Camera viewCamera)
+    void PrepareEnterRecord(Record record, View.State state, float plane, Camera viewCamera)
     {
         Transform target = record.transform;
-        Rigidbody body = record.rigidbody;
-        bool playerBody = record.kind == TargetKind.Player;
-        Vector3 preservedVelocity = Vector3.zero;
-        if (body != null)
+        if (target == null)
         {
-            preservedVelocity = body.velocity;
-            if (!playerBody)
-            {
-                if (!body.isKinematic)
-                {
-                    body.velocity = Vector3.zero;
-                    body.angularVelocity = Vector3.zero;
-                }
+            return;
+        }
 
-                body.isKinematic = true;
+        bool playerBody = record.kind == TargetKind.Player;
+        // 别的刚体先停掉物理，否则缩放父节点一动，模拟会把物体拽回去。
+        // 玩家保持动态，飞行过程中仍能按 3D 方式走路。
+        if (record.rigidbody != null && !playerBody)
+        {
+            if (!record.rigidbody.isKinematic)
+            {
+                record.rigidbody.velocity = Vector3.zero;
+                record.rigidbody.angularVelocity = Vector3.zero;
             }
+
+            record.rigidbody.isKinematic = true;
         }
 
         Bounds silhouette = record.silhouetteBounds;
-        Vector3 rootCenter = record.kind == TargetKind.Player
-            ? target.position
-            : silhouette.center;
+        Vector3 rootCenter = playerBody ? target.position : silhouette.center;
         Transform scaleRoot = InsertScaleRoot(target, rootCenter);
         record.scaleRoot = scaleRoot;
 
-        Vector3 flattened = scaleRoot.position;
-        if (state == View.State.Version2DX)
-        {
-            flattened.x = plane;
-        }
-        else
-        {
-            flattened.z = plane;
-        }
-
-        scaleRoot.position = flattened;
-        if (playerBody && body != null)
-        {
-            Vector3 playerPosition = body.position;
-            if (state == View.State.Version2DX)
-            {
-                playerPosition.x = plane;
-            }
-            else
-            {
-                playerPosition.z = plane;
-            }
-
-            body.position = playerPosition;
-            target.position = playerPosition;
-        }
-
-        Physics.SyncTransforms();
-
-        bool depthOnly = record.kind == TargetKind.Player;
+        bool depthOnly = playerBody;
         Vector3 worldScale = ComputeSilhouetteWorldScale(
             target,
             silhouette,
@@ -422,17 +472,190 @@ public class ViewFlattenSystem
             plane,
             viewCamera,
             depthOnly);
-        if (record.kind == TargetKind.Player)
+        record.flatWorldScale = worldScale;
+        record.progressFromScale = scaleRoot.localScale;
+        record.progressToScale = playerBody ? Vector3.one : worldScale;
+        record.progressFromDepth = AxisOf(target.position, state);
+        record.progressToDepth = plane;
+        // 玩家本来就站在压扁平面上，进入时不挪他的位置，只把子网格压薄。
+        record.driveDepth = !playerBody;
+
+        if (playerBody)
         {
             scaleRoot.localScale = Vector3.one;
-            ApplyDepthScaleToVisual(record, state, worldScale);
+            CapturePlayerDepthScales(record, state, worldScale);
+            // 地面碰撞跟着缩放时会把人顶起来。先锁住高度，落地后再贴回地面。
+            HoldPlayerHeight(record.rigidbody);
+        }
+    }
+
+    void PrepareExitRecord(Record record, View.State state)
+    {
+        if (record.transform == null || record.scaleRoot == null)
+        {
+            record.driveDepth = false;
+            return;
+        }
+
+        bool playerBody = record.kind == TargetKind.Player;
+        bool held = record.box != null && record.box.IsHeld;
+        record.progressFromScale = record.scaleRoot.localScale;
+        record.progressToScale = Vector3.one;
+        record.progressFromDepth = AxisOf(record.transform.position, state);
+        if (playerBody || IsMovedBox(record, state))
+        {
+            record.progressToDepth = state == View.State.Version2DX
+                ? ChangeTo3D.FindFloorAxisFrom2DX(record.transform.position)
+                : ChangeTo3D.FindFloorAxisFrom2DZ(record.transform.position);
         }
         else
         {
-            scaleRoot.localScale = worldScale;
+            record.progressToDepth = AxisOf(record.worldPosition, state);
+        }
+
+        // 拿在手里的箱子跟着人，不单独沿深度滑回去。
+        record.driveDepth = !held;
+
+        record.childScaleFrom.Clear();
+        record.childScaleTo.Clear();
+        int count = Mathf.Min(
+            record.depthScaledChildren.Count,
+            record.depthScaledChildScales.Count);
+        for (int i = 0; i < count; i++)
+        {
+            Transform child = record.depthScaledChildren[i];
+            Vector3 from = child != null
+                ? child.localScale
+                : record.depthScaledChildScales[i];
+            record.childScaleFrom.Add(from);
+            record.childScaleTo.Add(record.depthScaledChildScales[i]);
+        }
+
+        if (record.rigidbody == null)
+        {
+            return;
+        }
+
+        if (!playerBody)
+        {
+            if (!record.rigidbody.isKinematic)
+            {
+                record.rigidbody.velocity = Vector3.zero;
+                record.rigidbody.angularVelocity = Vector3.zero;
+            }
+
+            record.rigidbody.isKinematic = true;
+            return;
+        }
+
+        // 还原途中操作仍是 2D，但要放开压扁轴，人才能跟着镜头走回原来的深度。
+        // 高度继续锁住，避免地面变回立体时把人顶离表面。
+        record.rigidbody.constraints =
+            RigidbodyConstraints.FreezePositionY |
+            RigidbodyConstraints.FreezeRotationX |
+            RigidbodyConstraints.FreezeRotationY |
+            RigidbodyConstraints.FreezeRotationZ;
+        HoldPlayerHeight(record.rigidbody);
+    }
+
+    void ApplyRecordVisual(Record record, float t)
+    {
+        if (record.scaleRoot != null)
+        {
+            record.scaleRoot.localScale = Vector3.Lerp(
+                record.progressFromScale,
+                record.progressToScale,
+                t);
+        }
+
+        int count = Mathf.Min(record.childScaleFrom.Count, record.childScaleTo.Count);
+        count = Mathf.Min(count, record.depthScaledChildren.Count);
+        for (int i = 0; i < count; i++)
+        {
+            Transform child = record.depthScaledChildren[i];
+            if (child == null)
+            {
+                continue;
+            }
+
+            child.localScale = Vector3.Lerp(
+                record.childScaleFrom[i],
+                record.childScaleTo[i],
+                t);
+        }
+
+        if (!record.driveDepth || record.transform == null)
+        {
+            return;
+        }
+
+        float depth = Mathf.Lerp(record.progressFromDepth, record.progressToDepth, t);
+        MoveChildToDepth(record, depth);
+    }
+
+    // 先改缩放，再把物体上的深度轴补到目标值。缩放会带着子物体挪一点，所以深度要后写。
+    void MoveChildToDepth(Record record, float depth)
+    {
+        if (record.scaleRoot == null || record.transform == null)
+        {
+            return;
+        }
+
+        float current = AxisOf(record.transform.position, animState);
+        float delta = depth - current;
+        if (Mathf.Abs(delta) > 0.0000001f)
+        {
+            float rootDepth = AxisOf(record.scaleRoot.position, animState) + delta;
+            record.scaleRoot.position = WithAxis(record.scaleRoot.position, animState, rootDepth);
+        }
+
+        if (record.rigidbody == null)
+        {
+            return;
+        }
+
+        record.rigidbody.position = record.transform.position;
+        if (record.rigidbody.isKinematic)
+        {
+            return;
+        }
+
+        Vector3 velocity = record.rigidbody.velocity;
+        velocity = WithAxis(velocity, animState, 0f);
+        record.rigidbody.velocity = velocity;
+    }
+
+    void FinishEnterGameplay()
+    {
+        for (int i = 0; i < records.Count; i++)
+        {
+            ApplyEnterGameplay(records[i]);
         }
 
         Physics.SyncTransforms();
+        ApplyOcclusion(animState);
+        Physics.SyncTransforms();
+        flattened = true;
+    }
+
+    void ApplyEnterGameplay(Record record)
+    {
+        Transform target = record.transform;
+        if (target == null || record.scaleRoot == null)
+        {
+            return;
+        }
+
+        Rigidbody body = record.rigidbody;
+        bool playerBody = record.kind == TargetKind.Player;
+        View.State state = animState;
+
+        if (playerBody && body != null)
+        {
+            Vector3 playerPosition = WithAxis(body.position, state, record.progressToDepth);
+            body.position = playerPosition;
+            target.position = playerPosition;
+        }
 
         bool keepOwnColliders =
             record.kind == TargetKind.Box ||
@@ -443,83 +666,211 @@ public class ViewFlattenSystem
         if (!keepOwnColliders)
         {
             DisableChildColliders(record);
-            AddSilhouetteCollider(scaleRoot, silhouette, state, worldScale, record.kind == TargetKind.Floor);
+            AddSilhouetteCollider(
+                record.scaleRoot,
+                record.silhouetteBounds,
+                state,
+                record.flatWorldScale,
+                record.kind == TargetKind.Floor);
         }
 
-        if (body != null && (record.box == null || !record.box.IsHeld))
+        if (body == null || (record.box != null && record.box.IsHeld))
         {
-            if (playerBody)
-            {
-                if (state == View.State.Version2DX)
-                {
-                    preservedVelocity.x = 0f;
-                }
-                else
-                {
-                    preservedVelocity.z = 0f;
-                }
+            return;
+        }
 
-                body.useGravity = true;
-                body.velocity = preservedVelocity;
+        if (playerBody)
+        {
+            Vector3 velocity = WithAxis(body.velocity, state, 0f);
+            body.useGravity = true;
+            body.isKinematic = false;
+            body.velocity = velocity;
+            body.angularVelocity = Vector3.zero;
+            body.WakeUp();
+        }
+        else
+        {
+            body.isKinematic = record.rigidbodyKinematic;
+            if (!body.isKinematic)
+            {
+                body.velocity = Vector3.zero;
                 body.angularVelocity = Vector3.zero;
-                body.WakeUp();
             }
-            else
-            {
-                body.isKinematic = record.rigidbodyKinematic;
-                if (!body.isKinematic)
-                {
-                    body.velocity = Vector3.zero;
-                    body.angularVelocity = Vector3.zero;
-                }
-            }
+        }
 
-            if (state == View.State.Version2DX)
-            {
-                body.constraints =
-                    RigidbodyConstraints.FreezePositionX |
-                    RigidbodyConstraints.FreezeRotationX |
-                    RigidbodyConstraints.FreezeRotationY |
-                    RigidbodyConstraints.FreezeRotationZ;
-            }
-            else
-            {
-                body.constraints =
-                    RigidbodyConstraints.FreezePositionZ |
-                    RigidbodyConstraints.FreezeRotationX |
-                    RigidbodyConstraints.FreezeRotationY |
-                    RigidbodyConstraints.FreezeRotationZ;
-            }
+        if (state == View.State.Version2DX)
+        {
+            body.constraints =
+                RigidbodyConstraints.FreezePositionX |
+                RigidbodyConstraints.FreezeRotationX |
+                RigidbodyConstraints.FreezeRotationY |
+                RigidbodyConstraints.FreezeRotationZ;
+        }
+        else
+        {
+            body.constraints =
+                RigidbodyConstraints.FreezePositionZ |
+                RigidbodyConstraints.FreezeRotationX |
+                RigidbodyConstraints.FreezeRotationY |
+                RigidbodyConstraints.FreezeRotationZ;
         }
     }
 
-    static void ApplyDepthScaleToVisual(Record record, View.State state, Vector3 worldScale)
+    static void HoldPlayerHeight(Rigidbody body)
     {
-        Transform player = record.transform;
+        if (body == null)
+        {
+            return;
+        }
+
+        body.constraints |= RigidbodyConstraints.FreezePositionY;
+        Vector3 velocity = body.velocity;
+        velocity.y = 0f;
+        body.velocity = velocity;
+    }
+
+    // 用脚底对正身下的地面。角色缩放是 (1.5, 2, 1.5)，脚底不能写死，要按胶囊体算。
+    void StickPlayerToGround()
+    {
+        Transform player = view.transform;
+        if (player == null)
+        {
+            return;
+        }
+
+        CapsuleCollider capsule = player.GetComponent<CapsuleCollider>();
+        float footOffset = 0f;
+        if (capsule != null)
+        {
+            Vector3 localBottom = capsule.center;
+            float halfHeight = capsule.height * 0.5f;
+            if (capsule.direction == 0)
+            {
+                localBottom.x -= halfHeight;
+            }
+            else if (capsule.direction == 2)
+            {
+                localBottom.z -= halfHeight;
+            }
+            else
+            {
+                localBottom.y -= halfHeight;
+            }
+
+            footOffset = player.TransformPoint(localBottom).y - player.position.y;
+        }
+
+        float footY = player.position.y + footOffset;
+        Vector3 origin = new Vector3(player.position.x, footY + 3f, player.position.z);
+        RaycastHit[] hits = Physics.RaycastAll(
+            origin,
+            Vector3.down,
+            12f,
+            Physics.DefaultRaycastLayers,
+            QueryTriggerInteraction.Ignore);
+
+        bool found = false;
+        float groundY = 0f;
+        float bestGap = float.MaxValue;
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Transform hitTransform = hits[i].transform;
+            if (hitTransform == null || hitTransform == player || hitTransform.IsChildOf(player))
+            {
+                continue;
+            }
+
+            if (hits[i].normal.y < 0.45f)
+            {
+                continue;
+            }
+
+            if (hits[i].point.y > footY + 0.08f)
+            {
+                continue;
+            }
+
+            float gap = footY - hits[i].point.y;
+            if (gap < bestGap)
+            {
+                bestGap = gap;
+                groundY = hits[i].point.y;
+                found = true;
+            }
+        }
+
+        if (!found)
+        {
+            return;
+        }
+
+        Vector3 position = player.position;
+        position.y = groundY - footOffset;
+        Rigidbody body = player.GetComponent<Rigidbody>();
+        if (body != null)
+        {
+            body.position = position;
+            Vector3 velocity = body.velocity;
+            velocity.y = 0f;
+            body.velocity = velocity;
+        }
+
+        player.position = position;
+        Physics.SyncTransforms();
+    }
+
+    void CapturePlayerDepthScales(Record record, View.State state, Vector3 worldScale)
+    {
+        record.depthScaledChildren.Clear();
+        record.depthScaledChildScales.Clear();
+        record.childScaleFrom.Clear();
+        record.childScaleTo.Clear();
+
         float depth = state == View.State.Version2DX ? worldScale.x : worldScale.z;
+        Transform player = record.transform;
         for (int i = 0; i < player.childCount; i++)
         {
             Transform child = player.GetChild(i);
-            if (child.GetComponent<Rigidbody>() != null || child.GetComponent<GroundChecker>() != null)
+            if (child.GetComponent<Rigidbody>() != null ||
+                child.GetComponent<GroundChecker>() != null)
             {
                 continue;
             }
 
             record.depthScaledChildren.Add(child);
             record.depthScaledChildScales.Add(child.localScale);
-
-            Vector3 scale = child.localScale;
+            Vector3 flatScale = child.localScale;
             if (state == View.State.Version2DX)
             {
-                scale.x *= depth;
+                flatScale.x *= depth;
             }
             else
             {
-                scale.z *= depth;
+                flatScale.z *= depth;
             }
 
-            child.localScale = scale;
+            record.childScaleFrom.Add(child.localScale);
+            record.childScaleTo.Add(flatScale);
         }
+    }
+
+    static float AxisOf(Vector3 value, View.State state)
+    {
+        return state == View.State.Version2DX ? value.x : value.z;
+    }
+
+    static Vector3 WithAxis(Vector3 value, View.State state, float axis)
+    {
+        if (state == View.State.Version2DX)
+        {
+            value.x = axis;
+        }
+        else
+        {
+            value.z = axis;
+        }
+
+        return value;
     }
 
     static void RestoreDepthScaledChildren(Record record)
