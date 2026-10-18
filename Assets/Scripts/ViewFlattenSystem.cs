@@ -665,6 +665,8 @@ public class ViewFlattenSystem
 
         if (!keepOwnColliders)
         {
+            // 外形包围盒含草丛等装饰，比真实碰撞高。站立高度要用原碰撞的上下沿。
+            bool hasColliderHeight = TryGetSolidColliderHeight(target, out float minY, out float maxY);
             DisableChildColliders(record);
             AddSilhouetteCollider(
                 record.scaleRoot,
@@ -672,6 +674,10 @@ public class ViewFlattenSystem
                 state,
                 record.flatWorldScale,
                 record.kind == TargetKind.Floor);
+            if (hasColliderHeight)
+            {
+                FitColliderHeight(record.scaleRoot, minY, maxY);
+            }
         }
 
         if (body == null || (record.box != null && record.box.IsHeld))
@@ -825,7 +831,6 @@ public class ViewFlattenSystem
         record.depthScaledChildScales.Clear();
         record.childScaleFrom.Clear();
         record.childScaleTo.Clear();
-
         float depth = state == View.State.Version2DX ? worldScale.x : worldScale.z;
         Transform player = record.transform;
         for (int i = 0; i < player.childCount; i++)
@@ -1004,6 +1009,47 @@ public class ViewFlattenSystem
         {
             scaleRoot.gameObject.tag = "Ground";
         }
+    }
+
+    static bool TryGetSolidColliderHeight(Transform target, out float minY, out float maxY)
+    {
+        minY = float.PositiveInfinity;
+        maxY = float.NegativeInfinity;
+        Collider[] colliders = target.GetComponentsInChildren<Collider>();
+        for (int i = 0; i < colliders.Length; i++)
+        {
+            Collider collider = colliders[i];
+            if (collider == null || !collider.enabled || collider.isTrigger)
+            {
+                continue;
+            }
+
+            minY = Mathf.Min(minY, collider.bounds.min.y);
+            maxY = Mathf.Max(maxY, collider.bounds.max.y);
+        }
+
+        return maxY > minY;
+    }
+
+    static void FitColliderHeight(Transform scaleRoot, float minY, float maxY)
+    {
+        BoxCollider[] boxes = scaleRoot.GetComponents<BoxCollider>();
+        if (boxes.Length == 0)
+        {
+            return;
+        }
+
+        BoxCollider wall = boxes[boxes.Length - 1];
+        float sy = Mathf.Max(0.0001f, Mathf.Abs(scaleRoot.lossyScale.y));
+        Vector3 size = wall.size;
+        size.y = (maxY - minY) / sy;
+        wall.size = size;
+
+        Vector3 worldCenter = scaleRoot.position;
+        worldCenter.y = (minY + maxY) * 0.5f;
+        Vector3 center = wall.center;
+        center.y = scaleRoot.InverseTransformPoint(worldCenter).y;
+        wall.center = center;
     }
 
     static void RestoreDisabledColliders(Record record)
