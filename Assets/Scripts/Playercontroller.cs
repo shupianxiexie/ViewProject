@@ -27,6 +27,9 @@ public class PlayerController : MonoBehaviour
 
     public View view;
 
+    // 开场菜单和镜头飞到角色背后时关掉。落地后由菜单脚本重新打开。
+    public bool inputEnabled = true;
+
     CameraController cameraController;
 
     public Vector3 FacingDirection { get; private set; } = Vector3.forward;
@@ -54,6 +57,12 @@ public class PlayerController : MonoBehaviour
 
     void Update()
     {
+        if (!inputEnabled)
+        {
+            jumpRequested = false;
+            return;
+        }
+
         if (Input.GetKeyDown(KeyCode.Space) &&
             CarryLight.HeldLight == null &&
             gc != null &&
@@ -74,6 +83,16 @@ public class PlayerController : MonoBehaviour
     void Move()
     {
         Vector2 direction = new Vector2(0, 0);
+
+        if (!inputEnabled)
+        {
+            Vector3 velocity = rb.velocity;
+            velocity.x = 0f;
+            velocity.z = 0f;
+            rb.velocity = velocity;
+            SetWalking(false);
+            return;
+        }
 
         if (CarryLight.HeldLight != null)
         {

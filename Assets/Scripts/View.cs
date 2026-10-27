@@ -43,10 +43,15 @@ public class View : MonoBehaviour
         ChangeView();
     }
 
+    void LateUpdate()
+    {
+        flattenSystem.SyncPlayerVisual();
+    }
+
     void ChangeView()
     {
         PlayerController playerController = GetComponent<PlayerController>();
-        if (playerController == null)
+        if (playerController == null || !playerController.inputEnabled)
         {
             return;
         }
@@ -122,7 +127,8 @@ public class View : MonoBehaviour
         SyncCamera(state);
     }
 
-    // 还原和进入一样，外形跟着镜头走，3D 操作等镜头到了再恢复。
+    // 先把角色放到恢复后要站的地面上，再让镜头起飞。
+    // 角色和地面的厚度仍跟着镜头一起从扁变回立体。
     void BeginExit2D(State fromState)
     {
         flattenSystem.PrepareExit(fromState);

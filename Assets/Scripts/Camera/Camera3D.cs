@@ -20,7 +20,7 @@ public class Camera3D : MonoBehaviour
 
     private Vector2 mousePositionLastFrame;
 
-    // 切换过渡时由 CameraController 写位置。这里继续转的话，贝塞尔轨迹会被盖掉。
+    // 开场飞入和视角切换时由外面写位置。这里继续转的话，飞行动线会被盖掉。
     [HideInInspector]
     public bool suspendFollow;
 
@@ -89,5 +89,26 @@ public class Camera3D : MonoBehaviour
             armLength * Mathf.Sin(pitch) * Mathf.Cos(yaw)
         );
         return player.position + offset;
+    }
+
+    // 水平角改到角色正后方。俯仰角和臂长不动：俯仰角 90 是与角色同高，调小会抬高；臂长是距离。
+    public void PlaceOrbitBehindPlayer()
+    {
+        Vector3 back = Vector3.back;
+        if (player != null)
+        {
+            back = -player.forward;
+            back.y = 0f;
+            if (back.sqrMagnitude < 0.0001f)
+            {
+                back = Vector3.back;
+            }
+            else
+            {
+                back.Normalize();
+            }
+        }
+
+        currentRotationAngleX = Mathf.Atan2(back.x, back.z) * Mathf.Rad2Deg;
     }
 }

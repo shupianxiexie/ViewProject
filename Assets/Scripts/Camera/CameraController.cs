@@ -27,6 +27,10 @@ public class CameraController : MonoBehaviour
 
     public View.State currentState = View.State.Version3D;
 
+    // 开场落到角色背后之前为 true。这段时间不接受 Q/E，跟拍也不改写飞行中的位置。
+    [HideInInspector]
+    public bool holdForIntro;
+
     // 给 View 用。为 true 时 Q/E 不再改视角，也不再重开一条过渡。
     public bool IsTransitioning { get; private set; }
 
@@ -55,12 +59,24 @@ public class CameraController : MonoBehaviour
 
     void Start()
     {
-        // 开场没有上一台相机，直接摆到 3D，不播过渡。
+        // 菜单脚本会在 Awake 里先占住开场。这里再确认一次，避免跟拍相机先画出来。
+        if (holdForIntro)
+        {
+            SuppressGameplayCameras();
+            return;
+        }
+
+        // 没有开场相机时，直接摆到 3D，不播过渡。
         ChangeCamera(View.State.Version3D, true);
     }
 
     void LateUpdate()
     {
+        if (holdForIntro)
+        {
+            return;
+        }
+
         if (IsTransitioning)
         {
             // 三台相机的跟拍也写在 LateUpdate。过渡放在这里，并且已经把跟拍停掉，
@@ -87,6 +103,12 @@ public class CameraController : MonoBehaviour
 
     public void ChangeCamera(View.State state, bool immediate)
     {
+        // 开场飞入没结束时，Q/E 不能把跟拍相机提前打开。
+        if (holdForIntro)
+        {
+            return;
+        }
+
         // View 已经挡过一次。这里再挡一次，避免别的调用把正在飞的镜头打断。
         if (!immediate && IsTransitioning)
         {
@@ -100,6 +122,115 @@ public class CameraController : MonoBehaviour
         }
 
         ApplyImmediate(state);
+    }
+
+    // 开场只留菜单指定的那台相机。跟拍先停掉，也先从画面上拿掉。
+    public void SuppressGameplayCameras()
+    {
+        SetSuspendFollow(true);
+
+        if (camera3D != null)
+        {
+            camera3D.gameObject.SetActive(false);
+        }
+
+        if (camera2DX != null)
+        {
+            camera2DX.gameObject.SetActive(false);
+        }
+
+        if (camera2DZ != null)
+        {
+            camera2DZ.gameObject.SetActive(false);
+        }
+    }
+
+    // 点开始时调用。跟拍相机先摆到高处菜单相机现在的位置和朝向，轨道水平角改到角色背后。
+    // 接下来由菜单脚本移动这台相机，中间不再换相机。
+    public void UseGameplayCameraForIntroFlight(Vector3 position, Quaternion rotation)
+    {
+        holdForIntro = true;
+        SetSuspendFollow(true);
+
+        if (camera2DX != null)
+        {
+            camera2DX.gameObject.SetActive(false);
+        }
+
+        if (camera2DZ != null)
+        {
+            camera2DZ.gameObject.SetActive(false);
+        }
+
+        if (camera3D == null)
+        {
+            return;
+        }
+
+        if (camera3D.player == null)
+        {
+            camera3D.player = player;
+        }
+
+        camera3D.PlaceOrbitBehindPlayer();
+        camera3D.transform.SetPositionAndRotation(position, rotation);
+        camera3D.gameObject.SetActive(true);
+        camera3D.gameObject.tag = "MainCamera";
+
+        Camera unityCamera = camera3D.GetComponent<Camera>();
+        if (unityCamera != null)
+        {
+            unityCamera.orthographic = false;
+            unityCamera.ResetProjectionMatrix();
+            unityCamera.ResetCullingMatrix();
+        }
+    }
+
+    // 飞到背后之后调用。镜头已经在轨道上，这里只恢复跟拍，不再把它拉到别的位置。
+    public void FinishIntroFlight()
+    {
+        holdForIntro = false;
+        IsTransitioning = false;
+        currentState = View.State.Version3D;
+
+        if (playerView == null && player != null)
+        {
+            playerView = player.GetComponent<View>();
+        }
+
+        if (playerView != null)
+        {
+            playerView.OnCameraArrived();
+        }
+
+        if (camera2DX != null)
+        {
+            camera2DX.gameObject.SetActive(false);
+        }
+
+        if (camera2DZ != null)
+        {
+            camera2DZ.gameObject.SetActive(false);
+        }
+
+        if (camera3D != null)
+        {
+            camera3D.gameObject.SetActive(true);
+            Camera unityCamera = camera3D.GetComponent<Camera>();
+            if (unityCamera != null)
+            {
+                unityCamera.orthographic = false;
+                unityCamera.ResetProjectionMatrix();
+                unityCamera.ResetCullingMatrix();
+            }
+        }
+
+        SetSuspendFollow(false);
+
+        if (playerRigidbody != null)
+        {
+            ApplyConstraints(View.State.Version3D);
+        }
     }
 
     void BeginTransition(View.State state)
