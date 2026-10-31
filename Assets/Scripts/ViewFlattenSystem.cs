@@ -285,6 +285,12 @@ public class ViewFlattenSystem
         }
 
         view.GetComponent<ChangeTo3D>().SnapPlayerFrom2D(state);
+        CharacterPerspectiveScaler scaler = view.GetComponent<CharacterPerspectiveScaler>();
+        if (scaler != null)
+        {
+            scaler.RestoreOriginalSize();
+        }
+
         flattened = false;
         records.Clear();
         restoredSurfaces.Clear();

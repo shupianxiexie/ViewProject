@@ -217,14 +217,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8d42914f618947efb072df2597da98ab, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  minScaleMultiplier: 0.5
-  maxScaleMultiplier: 2
   extraGroundCheckDistance: 0.5
   keepFeetPosition: 1
-  toggleModeKey: 304
   scaleByXKey: 113
   scaleByZKey: 101
-  scaleModeEnabled: 0
 --- !u!1 &4434679613086016451
 GameObject:
   m_ObjectHideFlags: 0

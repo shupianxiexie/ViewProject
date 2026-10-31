@@ -1,24 +1,13 @@
-using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Toggles a character-scaling mode with Shift. While enabled, Q and E
-/// scale the character from its distance to the platform's positive X and
-/// positive Z edges respectively.
+/// 只在 2DX 或 2DZ 中，站在挂有 <see cref="PerspectiveScalePlatform"/> 的平台上时，
+/// Q 和 E 按该平台的倍数与轴向缩放角色。3D 中大小保持进游戏时的尺寸。
 /// </summary>
 [DefaultExecutionOrder(-100)]
 [DisallowMultipleComponent]
 public class CharacterPerspectiveScaler : MonoBehaviour
 {
-    [Header("Scale Multipliers")]
-    [Tooltip("Scale multiplier used at the platform's negative-axis edge.")]
-    [Min(0.01f)]
-    public float minScaleMultiplier = 0.5f;
-
-    [Tooltip("Scale multiplier used at the platform's positive-axis edge.")]
-    [Min(0.01f)]
-    public float maxScaleMultiplier = 2f;
-
     [Header("Platform Detection")]
     [Tooltip("Extra ray distance below the character collider.")]
     [Min(0f)]
@@ -28,31 +17,23 @@ public class CharacterPerspectiveScaler : MonoBehaviour
     public bool keepFeetPosition = true;
 
     [Header("Input")]
-    public KeyCode toggleModeKey = KeyCode.LeftShift;
     public KeyCode scaleByXKey = KeyCode.Q;
     public KeyCode scaleByZKey = KeyCode.E;
-
-    [Header("Runtime")]
-    [SerializeField]
-    private bool scaleModeEnabled;
-
-    private readonly Dictionary<Collider, Bounds> originalPlatformBounds =
-        new Dictionary<Collider, Bounds>();
 
     private Collider characterCollider;
     private Rigidbody characterRigidbody;
     private PlayerController playerController;
+    private View view;
     private Vector3 initialLocalScale;
     private float initialRigidbodyMass = 1f;
     private float initialGameplayWeight = 1f;
-
-    public bool ScaleModeEnabled => scaleModeEnabled;
 
     private void Awake()
     {
         characterCollider = GetComponent<Collider>();
         characterRigidbody = GetComponent<Rigidbody>();
         playerController = GetComponent<PlayerController>();
+        view = GetComponent<View>();
         initialLocalScale = transform.localScale;
 
         if (characterRigidbody != null)
@@ -66,26 +47,15 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         }
     }
 
-    private void Start()
-    {
-        CacheOriginalPlatformBounds();
-    }
-
     private void OnValidate()
     {
-        minScaleMultiplier = Mathf.Max(0.01f, minScaleMultiplier);
-        maxScaleMultiplier = Mathf.Max(minScaleMultiplier, maxScaleMultiplier);
         extraGroundCheckDistance = Mathf.Max(0f, extraGroundCheckDistance);
     }
 
     private void Update()
     {
-        if (Input.GetKeyDown(toggleModeKey))
-        {
-            scaleModeEnabled = !scaleModeEnabled;
-        }
-
-        if (!scaleModeEnabled)
+        // 3D 里 Q / E 只负责切视角，不改变大小。已经进入 2DX 或 2DZ 才允许缩放。
+        if (view == null || view.currentState == View.State.Version3D)
         {
             return;
         }
@@ -101,56 +71,51 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         }
     }
 
-    private void CacheOriginalPlatformBounds()
-    {
-        originalPlatformBounds.Clear();
-
-        foreach (Floor floor in Floor.allFloors)
-        {
-            if (floor == null)
-            {
-                continue;
-            }
-
-            foreach (Collider platformCollider in floor.GetComponentsInChildren<Collider>())
-            {
-                if (platformCollider != null && !platformCollider.isTrigger)
-                {
-                    originalPlatformBounds[platformCollider] = platformCollider.bounds;
-                }
-            }
-        }
-    }
-
     private void ScaleFromPositiveEdge(bool useXAxis)
     {
         if (!TryFindCurrentPlatform(out Collider platformCollider))
         {
-            Debug.LogWarning(
-                $"{nameof(CharacterPerspectiveScaler)} could not find a platform below {name}.",
-                this);
             return;
         }
 
-        Bounds platformBounds = GetOriginalPlatformBounds(platformCollider);
-        float coordinate = useXAxis ? transform.position.x : transform.position.z;
-        float minimum = useXAxis ? platformBounds.min.x : platformBounds.min.z;
-        float maximum = useXAxis ? platformBounds.max.x : platformBounds.max.z;
-        float axisLength = maximum - minimum;
-
-        if (axisLength <= Mathf.Epsilon)
+        if (!TryGetScalePlatform(platformCollider, out PerspectiveScalePlatform platform))
         {
             return;
         }
 
-        float distanceToPositiveEdge = Mathf.Abs(maximum - coordinate);
-        float distanceRatio = Mathf.Clamp01(distanceToPositiveEdge / axisLength);
-        float multiplier = Mathf.Lerp(
-            maxScaleMultiplier,
-            minScaleMultiplier,
-            distanceRatio);
+        if (!platform.TryGetMultiplier(
+                transform.position,
+                useXAxis,
+                platformCollider.bounds,
+                out float multiplier))
+        {
+            return;
+        }
 
-        ApplyScale(multiplier);
+        ApplyScale(multiplier, platformCollider);
+    }
+
+    // 镜头回到 3D 并拆掉压扁结构之后调用。恢复进游戏时的身体大小、质量和重量。
+    public void RestoreOriginalSize()
+    {
+        if (initialLocalScale == Vector3.zero)
+        {
+            return;
+        }
+
+        transform.localScale = initialLocalScale;
+
+        if (characterRigidbody != null)
+        {
+            characterRigidbody.mass = initialRigidbodyMass;
+        }
+
+        if (playerController != null)
+        {
+            playerController.weight = initialGameplayWeight;
+        }
+
+        Physics.SyncTransforms();
     }
 
     private bool TryFindCurrentPlatform(out Collider platformCollider)
@@ -173,7 +138,7 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         float nearestDistance = float.PositiveInfinity;
         foreach (RaycastHit hit in hits)
         {
-            if (!IsPlatform(hit.collider) || hit.distance >= nearestDistance)
+            if (!IsSupportingSurface(hit.collider) || hit.distance >= nearestDistance)
             {
                 continue;
             }
@@ -185,31 +150,43 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         return platformCollider != null;
     }
 
-    private static bool IsPlatform(Collider candidate)
+    private static bool IsSupportingSurface(Collider candidate)
     {
         return candidate != null &&
-               (candidate.CompareTag("Ground") ||
+               (TryGetScalePlatform(candidate, out _) ||
+                candidate.CompareTag("Ground") ||
                 candidate.GetComponentInParent<Floor>() != null ||
                 candidate.GetComponentInParent<Box>() != null);
     }
 
-    private Bounds GetOriginalPlatformBounds(Collider platformCollider)
+    private static bool TryGetScalePlatform(
+        Collider candidate,
+        out PerspectiveScalePlatform platform)
     {
-        if (originalPlatformBounds.TryGetValue(platformCollider, out Bounds bounds))
+        platform = null;
+        if (candidate == null)
         {
-            return bounds;
+            return false;
         }
 
-        // Movable boxes and platforms without Floor use their current bounds.
-        return platformCollider.bounds;
+        platform = candidate.GetComponentInParent<PerspectiveScalePlatform>();
+        if (platform != null)
+        {
+            return true;
+        }
+
+        // 压扁时真正踩到的碰撞体在父级 ViewScaleRoot 上，脚本仍留在原来的平台上。
+        if (candidate.GetComponent<ViewScaleRoot>() != null)
+        {
+            platform = candidate.GetComponentInChildren<PerspectiveScalePlatform>();
+        }
+
+        return platform != null;
     }
 
-    private void ApplyScale(float multiplier)
+    private void ApplyScale(float multiplier, Collider platformCollider)
     {
-        float previousFeetHeight = characterCollider != null
-            ? characterCollider.bounds.min.y
-            : transform.position.y;
-
+        float previousFootY = transform.position.y + GetFootOffset(transform);
         transform.localScale = initialLocalScale * multiplier;
 
         if (characterRigidbody != null)
@@ -228,16 +205,129 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         }
 
         Physics.SyncTransforms();
-        float heightCorrection = previousFeetHeight - characterCollider.bounds.min.y;
-        Vector3 correctedPosition = transform.position + Vector3.up * heightCorrection;
-
-        if (characterRigidbody != null)
+        float skin = 0f;
+        if (TryGetSurfaceY(platformCollider, out float surfaceY))
         {
-            characterRigidbody.position = correctedPosition;
+            skin = Mathf.Max(0f, characterCollider.contactOffset);
         }
         else
         {
-            transform.position = correctedPosition;
+            surfaceY = previousFootY;
         }
+
+        PlaceFeetAt(surfaceY, skin);
+    }
+
+    // 胶囊体底端贴到表面。命中地板时留出接触间距，避免比例变大后陷进去。
+    private void PlaceFeetAt(float surfaceY, float skin)
+    {
+        float footOffset = GetFootOffset(transform);
+        Vector3 position = transform.position;
+        position.y = surfaceY + skin - footOffset;
+
+        if (characterRigidbody != null)
+        {
+            characterRigidbody.position = position;
+            Vector3 velocity = characterRigidbody.velocity;
+            velocity.y = 0f;
+            characterRigidbody.velocity = velocity;
+        }
+
+        transform.position = position;
+        Physics.SyncTransforms();
+    }
+
+    private bool TryGetSurfaceY(Collider platformCollider, out float surfaceY)
+    {
+        surfaceY = 0f;
+        if (platformCollider == null)
+        {
+            return false;
+        }
+
+        float originY = Mathf.Max(
+            characterCollider.bounds.max.y,
+            platformCollider.bounds.max.y) + 1f;
+        Vector3 origin = new Vector3(transform.position.x, originY, transform.position.z);
+        float rayDistance = originY - platformCollider.bounds.min.y + 1f;
+
+        RaycastHit[] hits = Physics.RaycastAll(
+            origin,
+            Vector3.down,
+            rayDistance,
+            Physics.DefaultRaycastLayers,
+            QueryTriggerInteraction.Ignore);
+
+        bool found = false;
+        float nearestDistance = float.PositiveInfinity;
+        for (int i = 0; i < hits.Length; i++)
+        {
+            RaycastHit hit = hits[i];
+            Transform hitTransform = hit.collider.transform;
+            if (hitTransform == transform || hitTransform.IsChildOf(transform))
+            {
+                continue;
+            }
+
+            if (hit.normal.y < 0.45f ||
+                hit.distance >= nearestDistance ||
+                !IsSamePlatform(hit.collider, platformCollider))
+            {
+                continue;
+            }
+
+            nearestDistance = hit.distance;
+            surfaceY = hit.point.y;
+            found = true;
+        }
+
+        return found;
+    }
+
+    private static bool IsSamePlatform(Collider hit, Collider platform)
+    {
+        if (hit == null || platform == null || hit.transform == null || platform.transform == null)
+        {
+            return false;
+        }
+
+        if (hit.transform == platform.transform ||
+            hit.transform.IsChildOf(platform.transform) ||
+            platform.transform.IsChildOf(hit.transform))
+        {
+            return true;
+        }
+
+        PerspectiveScalePlatform hitPlatform = hit.GetComponentInParent<PerspectiveScalePlatform>();
+        PerspectiveScalePlatform standingPlatform =
+            platform.GetComponentInParent<PerspectiveScalePlatform>();
+        return hitPlatform != null && hitPlatform == standingPlatform;
+    }
+
+    // 与 ViewFlattenSystem 贴地时使用的胶囊体底端一致。
+    private static float GetFootOffset(Transform player)
+    {
+        CapsuleCollider capsule = player.GetComponent<CapsuleCollider>();
+        if (capsule == null)
+        {
+            return 0f;
+        }
+
+        Vector3 localBottom = capsule.center;
+        float halfHeight = capsule.height * 0.5f;
+        if (capsule.direction == 0)
+        {
+            localBottom.x -= halfHeight;
+        }
+        else if (capsule.direction == 2)
+        {
+            localBottom.z -= halfHeight;
+        }
+        else
+        {
+            localBottom.y -= halfHeight;
+        }
+
+        return player.TransformPoint(localBottom).y - player.position.y;
     }
 }
