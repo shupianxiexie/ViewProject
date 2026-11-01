@@ -1,8 +1,9 @@
 using UnityEngine;
 
 /// <summary>
-/// 镜头进入 2D 并到位后，若脚下平台挂有 <see cref="PerspectiveScalePlatform"/>，
-/// 按左右位置自动缩放角色。2DX 用世界 Z，2DZ 用世界 X。回到 3D 后恢复初始大小。
+/// 镜头进入 2D 后，若脚下平台挂有 <see cref="PerspectiveScalePlatform"/>，
+/// 按整块平台的位置持续缩放。2DZ 用 X：靠近正方向变大。2DX 用 Z：远离正方向变大。
+/// 回到 3D 后恢复初始大小。
 /// </summary>
 [DisallowMultipleComponent]
 public class CharacterPerspectiveScaler : MonoBehaviour
@@ -49,7 +50,7 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         extraGroundCheckDistance = Mathf.Max(0f, extraGroundCheckDistance);
     }
 
-    // 2D 镜头到位时调用。2DX 按世界 Z，2DZ 按世界 X。没有可缩放平台时保持原大小。
+    // 2D 停留时按整块平台重算。不在可缩放平台上时恢复为 1。腾空时保持当前倍数。
     public bool TryApplyForView(View.State state)
     {
         if (state == View.State.Version3D)
@@ -58,19 +59,32 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         }
 
         bool useXAxis = state == View.State.Version2DZ;
-        if (!TryFindCurrentPlatform(out Collider platformCollider) ||
-            !TryGetScalePlatform(platformCollider, out PerspectiveScalePlatform platform) ||
-            !platform.TryGetMultiplier(
-                transform.position,
-                useXAxis,
-                platformCollider.bounds,
-                out float multiplier))
+        float multiplier = 1f;
+        Collider platformCollider = null;
+        if (TryFindCurrentPlatform(out platformCollider) &&
+            TryGetScalePlatform(platformCollider, out PerspectiveScalePlatform platform))
         {
-            return false;
+            if (!platform.TryGetMultiplier(
+                    transform.position,
+                    useXAxis,
+                    platformCollider.bounds,
+                    out multiplier))
+            {
+                multiplier = 1f;
+            }
+        }
+        else if (platformCollider == null)
+        {
+            return CurrentMultiplier > 0f;
         }
 
+        bool unchanged = Mathf.Abs(multiplier - CurrentMultiplier) <= 0.0001f;
         CurrentMultiplier = multiplier;
-        ApplyScale(multiplier, platformCollider);
+        if (!unchanged)
+        {
+            ApplyScale(multiplier, platformCollider);
+        }
+
         return true;
     }
 
@@ -185,17 +199,24 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         }
 
         Physics.SyncTransforms();
-        float skin = 0f;
-        if (TryGetSurfaceY(platformCollider, out float surfaceY))
+        float targetFootY = previousFootY;
+        if (platformCollider != null &&
+            TryGetSurfaceY(platformCollider, out float surfaceY))
         {
-            skin = Mathf.Max(0f, characterCollider.contactOffset);
-        }
-        else
-        {
-            surfaceY = previousFootY;
+            float skin = Mathf.Max(0f, characterCollider.contactOffset);
+            if (previousFootY < surfaceY + skin)
+            {
+                targetFootY = surfaceY + skin;
+            }
         }
 
-        PlaceFeetAt(surfaceY, skin);
+        float newFootY = transform.position.y + GetFootOffset(transform);
+        if (Mathf.Abs(newFootY - targetFootY) <= 0.001f)
+        {
+            return;
+        }
+
+        PlaceFeetAt(targetFootY, 0f);
     }
 
     // 胶囊体底端贴到表面。命中地板时留出接触间距，避免比例变大后陷进去。

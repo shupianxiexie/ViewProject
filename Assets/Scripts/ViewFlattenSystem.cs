@@ -56,6 +56,8 @@ public class ViewFlattenSystem
         public readonly List<Vector3> childScaleFrom = new List<Vector3>();
         public readonly List<Vector3> childScaleTo = new List<Vector3>();
         public Transform visualFlattenRoot;
+        public Vector3 perspectiveBaseVisualScale = Vector3.one;
+        public bool hasPerspectiveBase;
         public readonly List<VisualPose> visualPoses = new List<VisualPose>();
     }
 
@@ -168,6 +170,11 @@ public class ViewFlattenSystem
             return;
         }
 
+        if (flattened && !visualAnimating)
+        {
+            RefreshPerspectiveVisual();
+        }
+
         for (int i = 0; i < records.Count; i++)
         {
             Record record = records[i];
@@ -227,8 +234,25 @@ public class ViewFlattenSystem
         StickPlayerToGround();
     }
 
-    // 2D 到位后按脚下平台缩放碰撞体，并把压扁模型乘上同一倍数。
+    // 2D 停留期间按整块平台重算倍数，模型厚度保持压扁结果，只乘这一个倍数。
     void ApplyEnteredPerspectiveScale()
+    {
+        for (int i = 0; i < records.Count; i++)
+        {
+            Record record = records[i];
+            if (record.kind != TargetKind.Player || record.visualFlattenRoot == null)
+            {
+                continue;
+            }
+
+            record.perspectiveBaseVisualScale = record.visualFlattenRoot.localScale;
+            record.hasPerspectiveBase = true;
+        }
+
+        RefreshPerspectiveVisual();
+    }
+
+    void RefreshPerspectiveVisual()
     {
         CharacterPerspectiveScaler scaler = view.GetComponent<CharacterPerspectiveScaler>();
         if (scaler == null || !scaler.TryApplyForView(animState))
@@ -240,12 +264,14 @@ public class ViewFlattenSystem
         for (int i = 0; i < records.Count; i++)
         {
             Record record = records[i];
-            if (record.kind != TargetKind.Player || record.visualFlattenRoot == null)
+            if (record.kind != TargetKind.Player ||
+                record.visualFlattenRoot == null ||
+                !record.hasPerspectiveBase)
             {
                 continue;
             }
 
-            record.visualFlattenRoot.localScale *= multiplier;
+            record.visualFlattenRoot.localScale = record.perspectiveBaseVisualScale * multiplier;
         }
     }
 
