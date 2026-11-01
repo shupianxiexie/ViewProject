@@ -2,7 +2,7 @@ using UnityEngine;
 
 /// <summary>
 /// 挂到平台上后，角色站在这块平台上才能透视缩放。
-/// 每块平台自己决定倍数，以及允许沿 X（Q）还是 Z（E）缩放。
+/// 每块平台自己决定倍数。进入 2DZ 时用 X，进入 2DX 时用 Z。
 /// 脚本放在碰撞体物体上，或放在它的父物体上。
 /// </summary>
 [DisallowMultipleComponent]
@@ -18,10 +18,10 @@ public class PerspectiveScalePlatform : MonoBehaviour
     public float maxScaleMultiplier = 2f;
 
     [Header("允许的轴")]
-    [Tooltip("站在这块平台上时，允许按 Q，按角色在平台 X 轴上的位置缩放。")]
+    [Tooltip("进入 2DZ 后，按角色在平台 X 方向上的位置缩放。")]
     public bool allowScaleByX = true;
 
-    [Tooltip("站在这块平台上时，允许按 E，按角色在平台 Z 轴上的位置缩放。")]
+    [Tooltip("进入 2DX 后，按角色在平台 Z 方向上的位置缩放。")]
     public bool allowScaleByZ = true;
 
     private void OnValidate()

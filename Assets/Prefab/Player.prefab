@@ -219,8 +219,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   extraGroundCheckDistance: 0.5
   keepFeetPosition: 1
-  scaleByXKey: 113
-  scaleByZKey: 101
 --- !u!1 &4434679613086016451
 GameObject:
   m_ObjectHideFlags: 0

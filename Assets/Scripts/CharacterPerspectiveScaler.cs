@@ -1,10 +1,9 @@
 using UnityEngine;
 
 /// <summary>
-/// 只在 2DX 或 2DZ 中，站在挂有 <see cref="PerspectiveScalePlatform"/> 的平台上时，
-/// Q 和 E 按该平台的倍数与轴向缩放角色。3D 中大小保持进游戏时的尺寸。
+/// 镜头进入 2D 并到位后，若脚下平台挂有 <see cref="PerspectiveScalePlatform"/>，
+/// 按左右位置自动缩放角色。2DX 用世界 Z，2DZ 用世界 X。回到 3D 后恢复初始大小。
 /// </summary>
-[DefaultExecutionOrder(-100)]
 [DisallowMultipleComponent]
 public class CharacterPerspectiveScaler : MonoBehaviour
 {
@@ -16,24 +15,22 @@ public class CharacterPerspectiveScaler : MonoBehaviour
     [Tooltip("Keep the character's feet at the same height after scaling.")]
     public bool keepFeetPosition = true;
 
-    [Header("Input")]
-    public KeyCode scaleByXKey = KeyCode.Q;
-    public KeyCode scaleByZKey = KeyCode.E;
-
     private Collider characterCollider;
     private Rigidbody characterRigidbody;
     private PlayerController playerController;
-    private View view;
     private Vector3 initialLocalScale;
     private float initialRigidbodyMass = 1f;
     private float initialGameplayWeight = 1f;
+
+    public float CurrentMultiplier { get; private set; } = 1f;
+
+    public Vector3 InitialLocalScale => initialLocalScale;
 
     private void Awake()
     {
         characterCollider = GetComponent<Collider>();
         characterRigidbody = GetComponent<Rigidbody>();
         playerController = GetComponent<PlayerController>();
-        view = GetComponent<View>();
         initialLocalScale = transform.localScale;
 
         if (characterRigidbody != null)
@@ -52,52 +49,35 @@ public class CharacterPerspectiveScaler : MonoBehaviour
         extraGroundCheckDistance = Mathf.Max(0f, extraGroundCheckDistance);
     }
 
-    private void Update()
+    // 2D 镜头到位时调用。2DX 按世界 Z，2DZ 按世界 X。没有可缩放平台时保持原大小。
+    public bool TryApplyForView(View.State state)
     {
-        // 3D 里 Q / E 只负责切视角，不改变大小。已经进入 2DX 或 2DZ 才允许缩放。
-        if (view == null || view.currentState == View.State.Version3D)
+        if (state == View.State.Version3D)
         {
-            return;
+            return false;
         }
 
-        if (Input.GetKeyDown(scaleByXKey))
-        {
-            ScaleFromPositiveEdge(useXAxis: true);
-        }
-
-        if (Input.GetKeyDown(scaleByZKey))
-        {
-            ScaleFromPositiveEdge(useXAxis: false);
-        }
-    }
-
-    private void ScaleFromPositiveEdge(bool useXAxis)
-    {
-        if (!TryFindCurrentPlatform(out Collider platformCollider))
-        {
-            return;
-        }
-
-        if (!TryGetScalePlatform(platformCollider, out PerspectiveScalePlatform platform))
-        {
-            return;
-        }
-
-        if (!platform.TryGetMultiplier(
+        bool useXAxis = state == View.State.Version2DZ;
+        if (!TryFindCurrentPlatform(out Collider platformCollider) ||
+            !TryGetScalePlatform(platformCollider, out PerspectiveScalePlatform platform) ||
+            !platform.TryGetMultiplier(
                 transform.position,
                 useXAxis,
                 platformCollider.bounds,
                 out float multiplier))
         {
-            return;
+            return false;
         }
 
+        CurrentMultiplier = multiplier;
         ApplyScale(multiplier, platformCollider);
+        return true;
     }
 
     // 镜头回到 3D 并拆掉压扁结构之后调用。恢复进游戏时的身体大小、质量和重量。
     public void RestoreOriginalSize()
     {
+        CurrentMultiplier = 1f;
         if (initialLocalScale == Vector3.zero)
         {
             return;

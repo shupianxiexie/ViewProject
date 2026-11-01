@@ -206,7 +206,8 @@ public class ViewFlattenSystem
             FinishEnterGameplay();
             visualAnimating = false;
             animatingEnter = false;
-            // 碰撞已经换成最终形状，再把脚底落到这块表面上。
+            // 模型先压到最终厚度，再按脚下位置放大，最后把脚底贴回地面。
+            ApplyEnteredPerspectiveScale();
             StickPlayerToGround();
             return;
         }
@@ -224,6 +225,28 @@ public class ViewFlattenSystem
         }
 
         StickPlayerToGround();
+    }
+
+    // 2D 到位后按脚下平台缩放碰撞体，并把压扁模型乘上同一倍数。
+    void ApplyEnteredPerspectiveScale()
+    {
+        CharacterPerspectiveScaler scaler = view.GetComponent<CharacterPerspectiveScaler>();
+        if (scaler == null || !scaler.TryApplyForView(animState))
+        {
+            return;
+        }
+
+        float multiplier = scaler.CurrentMultiplier;
+        for (int i = 0; i < records.Count; i++)
+        {
+            Record record = records[i];
+            if (record.kind != TargetKind.Player || record.visualFlattenRoot == null)
+            {
+                continue;
+            }
+
+            record.visualFlattenRoot.localScale *= multiplier;
+        }
     }
 
     public void RestoreFrom2D(View.State state)
@@ -600,7 +623,18 @@ public class ViewFlattenSystem
                 ? child.localScale
                 : record.depthScaledChildScales[i];
             record.childScaleFrom.Add(from);
-            record.childScaleTo.Add(record.depthScaledChildScales[i]);
+            Vector3 toScale = record.depthScaledChildScales[i];
+            if (playerBody)
+            {
+                CharacterPerspectiveScaler scaler =
+                    record.transform.GetComponent<CharacterPerspectiveScaler>();
+                if (scaler != null)
+                {
+                    toScale *= scaler.CurrentMultiplier;
+                }
+            }
+
+            record.childScaleTo.Add(toScale);
         }
 
         if (record.rigidbody == null)
