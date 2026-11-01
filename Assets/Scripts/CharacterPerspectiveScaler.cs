@@ -163,16 +163,28 @@ public class CharacterPerspectiveScaler : MonoBehaviour
             return false;
         }
 
-        platform = candidate.GetComponentInParent<PerspectiveScalePlatform>();
-        if (platform != null)
+        Transform current = candidate.transform;
+        while (current != null)
         {
-            return true;
+            platform = current.GetComponent<PerspectiveScalePlatform>();
+            if (platform != null)
+            {
+                return true;
+            }
+
+            current = current.parent;
         }
 
-        // 压扁时真正踩到的碰撞体在父级 ViewScaleRoot 上，脚本仍留在原来的平台上。
-        if (candidate.GetComponent<ViewScaleRoot>() != null)
+        // 整组被压扁时，脚本在 ViewScaleRoot 的子物体上。
+        ViewScaleRoot scaleRoot = candidate.GetComponent<ViewScaleRoot>();
+        if (scaleRoot == null)
         {
-            platform = candidate.GetComponentInChildren<PerspectiveScalePlatform>();
+            scaleRoot = candidate.GetComponentInParent<ViewScaleRoot>();
+        }
+
+        if (scaleRoot != null)
+        {
+            platform = scaleRoot.GetComponentInChildren<PerspectiveScalePlatform>(true);
         }
 
         return platform != null;

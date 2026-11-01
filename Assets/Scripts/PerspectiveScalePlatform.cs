@@ -1,9 +1,9 @@
 using UnityEngine;
 
 /// <summary>
-/// 挂到平台上后，角色在 2D 里会按整块平台的位置缩放。
-/// X：靠近正方向变大，远离变小。Z：远离正方向变大，靠近变小。
-/// 脚本放在碰撞体物体上，或放在它的父物体上。
+/// 挂在一整块平台上，或挂在由多块小平台组成的父物体上。
+/// 父物体不要加碰撞体，小平台上不要再挂这个脚本。
+/// X：靠近正方向变大。Z：远离正方向变大。
 /// </summary>
 [DisallowMultipleComponent]
 public class PerspectiveScalePlatform : MonoBehaviour
@@ -23,6 +23,17 @@ public class PerspectiveScalePlatform : MonoBehaviour
 
     [Tooltip("进入 2DX 后，远离平台 Z 正方向变大，靠近变小。")]
     public bool allowScaleByZ = true;
+
+    bool hasLocalRange;
+    float localMinX;
+    float localMaxX;
+    float localMinZ;
+    float localMaxZ;
+
+    private void Start()
+    {
+        CacheLocalRange();
+    }
 
     private void OnValidate()
     {
@@ -54,6 +65,11 @@ public class PerspectiveScalePlatform : MonoBehaviour
             return false;
         }
 
+        if (!hasLocalRange)
+        {
+            CacheLocalRange();
+        }
+
         if (!TryGetAxisRange(useXAxis, fallbackBounds, out float minimum, out float maximum))
         {
             return false;
@@ -65,15 +81,8 @@ public class PerspectiveScalePlatform : MonoBehaviour
             return false;
         }
 
-        Vector3 axis = useXAxis ? transform.right : transform.forward;
-        axis.y = 0f;
-        if (axis.sqrMagnitude <= Mathf.Epsilon)
-        {
-            axis = useXAxis ? Vector3.right : Vector3.forward;
-        }
-
-        axis.Normalize();
-        float coordinate = Vector3.Dot(worldPosition, axis);
+        Vector3 localPosition = transform.InverseTransformPoint(worldPosition);
+        float coordinate = useXAxis ? localPosition.x : localPosition.z;
         float distanceRatio = Mathf.Clamp01((maximum - coordinate) / axisLength);
         float minimumMultiplier = Mathf.Max(0.01f, minScaleMultiplier);
         float maximumMultiplier = Mathf.Max(minimumMultiplier, maxScaleMultiplier);
@@ -84,78 +93,92 @@ public class PerspectiveScalePlatform : MonoBehaviour
         return true;
     }
 
-    bool TryGetAxisRange(bool useXAxis, Bounds fallbackBounds, out float minimum, out float maximum)
+    // 进游戏时记下子平台还开着的碰撞体。2D 里这些碰撞体会被关掉，不能再拿来量长度。
+    void CacheLocalRange()
     {
-        Vector3 axis = useXAxis ? transform.right : transform.forward;
-        axis.y = 0f;
-        if (axis.sqrMagnitude <= Mathf.Epsilon)
-        {
-            axis = useXAxis ? Vector3.right : Vector3.forward;
-        }
+        hasLocalRange = false;
+        localMinX = 0f;
+        localMaxX = 0f;
+        localMinZ = 0f;
+        localMaxZ = 0f;
 
-        axis.Normalize();
-        bool found = false;
-        minimum = 0f;
-        maximum = 0f;
-        Collider[] ownColliders = GetComponents<Collider>();
-        if (!EncapsulateAxis(ownColliders, axis, ref found, ref minimum, ref maximum))
-        {
-            EncapsulateAxis(GetComponentsInChildren<Collider>(true), axis, ref found, ref minimum, ref maximum);
-        }
-
-        if (!found)
-        {
-            ProjectBounds(fallbackBounds, axis, out minimum, out maximum);
-            found = maximum - minimum > Mathf.Epsilon;
-        }
-
-        return found;
-    }
-
-    static bool EncapsulateAxis(
-        Collider[] colliders,
-        Vector3 axis,
-        ref bool found,
-        ref float minimum,
-        ref float maximum)
-    {
-        if (colliders == null)
-        {
-            return found;
-        }
-
+        Collider[] colliders = GetComponentsInChildren<Collider>(true);
         for (int i = 0; i < colliders.Length; i++)
         {
             Collider collider = colliders[i];
-            if (collider == null || collider.isTrigger)
+            if (!IsMeasurableCollider(collider))
             {
                 continue;
             }
 
-            ProjectBounds(collider.bounds, axis, out float min, out float max);
-            if (!found)
-            {
-                minimum = min;
-                maximum = max;
-                found = true;
-                continue;
-            }
-
-            minimum = Mathf.Min(minimum, min);
-            maximum = Mathf.Max(maximum, max);
+            IncludeWorldBounds(collider.bounds);
         }
 
-        return found;
+        if (hasLocalRange)
+        {
+            return;
+        }
+
+        Renderer[] renderers = GetComponentsInChildren<Renderer>(true);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            Renderer renderer = renderers[i];
+            if (renderer == null || renderer.bounds.size.sqrMagnitude <= 0.0001f)
+            {
+                continue;
+            }
+
+            IncludeWorldBounds(renderer.bounds);
+        }
     }
 
-    static void ProjectBounds(Bounds bounds, Vector3 axis, out float minimum, out float maximum)
+    bool TryGetAxisRange(bool useXAxis, Bounds fallbackBounds, out float minimum, out float maximum)
     {
-        float center = Vector3.Dot(bounds.center, axis);
-        float extent =
-            Mathf.Abs(axis.x) * bounds.extents.x +
-            Mathf.Abs(axis.y) * bounds.extents.y +
-            Mathf.Abs(axis.z) * bounds.extents.z;
-        minimum = center - extent;
-        maximum = center + extent;
+        if (hasLocalRange)
+        {
+            minimum = useXAxis ? localMinX : localMinZ;
+            maximum = useXAxis ? localMaxX : localMaxZ;
+            return maximum - minimum > Mathf.Epsilon;
+        }
+
+        IncludeWorldBounds(fallbackBounds);
+        minimum = useXAxis ? localMinX : localMinZ;
+        maximum = useXAxis ? localMaxX : localMaxZ;
+        return hasLocalRange && maximum - minimum > Mathf.Epsilon;
+    }
+
+    static bool IsMeasurableCollider(Collider collider)
+    {
+        return collider != null &&
+               collider.enabled &&
+               !collider.isTrigger &&
+               collider.GetComponent<ViewScaleRoot>() == null &&
+               collider.bounds.size.sqrMagnitude > 0.0001f;
+    }
+
+    void IncludeWorldBounds(Bounds worldBounds)
+    {
+        Vector3 center = worldBounds.center;
+        Vector3 extents = worldBounds.extents;
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 corner = center + new Vector3(
+                (i & 1) == 0 ? -extents.x : extents.x,
+                (i & 2) == 0 ? -extents.y : extents.y,
+                (i & 4) == 0 ? -extents.z : extents.z);
+            Vector3 local = transform.InverseTransformPoint(corner);
+            if (!hasLocalRange)
+            {
+                localMinX = localMaxX = local.x;
+                localMinZ = localMaxZ = local.z;
+                hasLocalRange = true;
+                continue;
+            }
+
+            localMinX = Mathf.Min(localMinX, local.x);
+            localMaxX = Mathf.Max(localMaxX, local.x);
+            localMinZ = Mathf.Min(localMinZ, local.z);
+            localMaxZ = Mathf.Max(localMaxZ, local.z);
+        }
     }
 }
