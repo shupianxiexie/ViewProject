@@ -161,6 +161,41 @@ public class View : MonoBehaviour
         cameraTransitionArmed = false;
     }
 
+    // 侧面里被关掉的箱子，放下时立刻重新打开，不需要再切一次视角。
+    public void WakeDroppedBox(Box box)
+    {
+        flattenSystem.WakeDroppedBox(box);
+    }
+
+    // 2D 里放下的箱子改用和地面对齐的碰撞，避免从压扁地面穿下去。
+    public bool TryDropFlattenedBox(
+        Box box,
+        Vector3 direction,
+        float forwardForce,
+        float upwardForce,
+        Collider playerCollider,
+        out Collider solidCollider)
+    {
+        return flattenSystem.TryDropFlattenedBox(
+            box,
+            direction,
+            forwardForce,
+            upwardForce,
+            playerCollider,
+            out solidCollider);
+    }
+
+    public void ReleaseFlattenedDropBody(Box box)
+    {
+        flattenSystem.ReleaseFlattenedDropBody(box);
+    }
+
+    // 侧面里只有更靠近镜头、并且投影盖住物品的箱子，才挡住钥匙和拼图。
+    public bool IsItemBlockedByBox(Transform item)
+    {
+        return flattenSystem.IsItemBlockedByBox(item);
+    }
+
     // 过渡途中的 Q/E 直接丢掉，不排队等当前这条飞完。
     bool IsCameraTransitioning()
     {

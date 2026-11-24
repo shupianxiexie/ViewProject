@@ -24,6 +24,7 @@ public class PlayerController : MonoBehaviour
     public float jumpGroundLockDuration = 0.2f;
 
     GroundChecker gc;
+    CharacterPerspectiveScaler perspectiveScaler;
 
     public View view;
 
@@ -41,11 +42,15 @@ public class PlayerController : MonoBehaviour
 
     public bool CanRegisterGround => Time.time >= jumpGroundLockUntil;
 
+    public moveRemind_UI mRemind;
+    public spaceRemind_UI sRemind;
+
     void Start()
     {
         rb = GetComponent<Rigidbody>();
 
         gc = GetComponentInChildren<GroundChecker>();
+        perspectiveScaler = GetComponent<CharacterPerspectiveScaler>();
 
         view = GetComponent<View>();
 
@@ -109,21 +114,29 @@ public class PlayerController : MonoBehaviour
             if (Input.GetKey(KeyCode.W))
             {
                 direction.y += 1;
+                if(mRemind != null)
+                    mRemind.HideHint();
             }
 
             if (Input.GetKey(KeyCode.S))
             {
                 direction.y -= 1;
+                if (mRemind != null)
+                    mRemind.HideHint();
             }
 
             if (Input.GetKey(KeyCode.A))
             {
                 direction.x -= 1;
+                if (mRemind != null)
+                    mRemind.HideHint();
             }
 
             if (Input.GetKey(KeyCode.D))
             {
                 direction.x += 1;
+                if (mRemind != null)
+                    mRemind.HideHint();
             }
 
 
@@ -262,8 +275,16 @@ public class PlayerController : MonoBehaviour
         Vector3 velocity = rb.velocity;
         velocity.y = 0f;
         rb.velocity = velocity;
-        rb.AddForce(Vector3.up * jumpForce * jumpImpulseMultiplier, ForceMode.Impulse);
+        // 质量已随体型变化。高度与向上速度的平方成正比，冲量再乘 倍数 * sqrt(倍数)，高度才与体型成正比。
+        float scale = perspectiveScaler != null
+            ? Mathf.Max(0.01f, perspectiveScaler.CurrentMultiplier)
+            : 1f;
+        float impulseScale = scale * Mathf.Sqrt(scale);
+        rb.AddForce(Vector3.up * jumpForce * jumpImpulseMultiplier * impulseScale, ForceMode.Impulse);
         gc.isGrounded = false;
         jumpGroundLockUntil = Time.time + jumpGroundLockDuration;
+
+        if (sRemind != null)
+            sRemind.HideHint();
     }
 }

@@ -3,8 +3,9 @@ using UnityEngine;
 
 public class ViewFlattenSystem
 {
-    const float MovedEpsilon = 0.08f;
     const float DepthEpsilon = 0.01f;
+    // 高出脚底这么多的面当成头顶，不能拿来当落点。
+    const float OverheadReject = 0.35f;
     enum TargetKind
     {
         Floor,
@@ -58,6 +59,11 @@ public class ViewFlattenSystem
         public Transform visualFlattenRoot;
         public Vector3 perspectiveBaseVisualScale = Vector3.one;
         public bool hasPerspectiveBase;
+        public bool stairTreadsInstalled;
+        public Transform dropBodyRoot;
+        public bool holdAnchor;
+        public Vector3 anchorWorld;
+        public Vector3 anchorLocal;
         public readonly List<VisualPose> visualPoses = new List<VisualPose>();
     }
 
@@ -76,6 +82,8 @@ public class ViewFlattenSystem
     bool flattened;
     bool visualAnimating;
     bool animatingEnter;
+    bool holdPlayerOnStair;
+    Vector3 pinnedPlayerPosition;
     View.State animState;
 
     public ViewFlattenSystem(View view)
@@ -87,6 +95,7 @@ public class ViewFlattenSystem
     // 人和箱子在投影上重叠时直接失败，镜头也不会飞。
     public bool PrepareEnter(View.State state)
     {
+        holdPlayerOnStair = false;
         if (flattened || visualAnimating)
         {
             return false;
@@ -114,6 +123,7 @@ public class ViewFlattenSystem
         animState = state;
         animatingEnter = true;
         visualAnimating = true;
+        RememberStairStep();
 
         for (int i = 0; i < records.Count; i++)
         {
@@ -127,11 +137,13 @@ public class ViewFlattenSystem
     // 镜头起飞前先把角色放到恢复后的地面上。厚度仍和所有地面一起，跟着镜头变。
     public bool PrepareExit(View.State state)
     {
+        holdPlayerOnStair = false;
         if (!flattened || visualAnimating)
         {
             return false;
         }
 
+        ReleaseAllDropBodies();
         animState = state;
         animatingEnter = false;
         visualAnimating = true;
@@ -159,6 +171,7 @@ public class ViewFlattenSystem
             ApplyRecordVisual(records[i], t);
         }
 
+        KeepPinnedPlayer();
         Physics.SyncTransforms();
     }
 
@@ -211,9 +224,10 @@ public class ViewFlattenSystem
         {
             SetVisualProgress(1f);
             FinishEnterGameplay();
+            holdPlayerOnStair = false;
             visualAnimating = false;
             animatingEnter = false;
-            // 模型先压到最终厚度，再按脚下位置放大，最后把脚底贴回地面。
+            // 模型先压到最终厚度。人在触发区域内才按边界定一次倍数，最后把脚底贴回地面。
             ApplyEnteredPerspectiveScale();
             StickPlayerToGround();
             return;
@@ -234,7 +248,7 @@ public class ViewFlattenSystem
         StickPlayerToGround();
     }
 
-    // 2D 停留期间按整块平台重算倍数，模型厚度保持压扁结果，只乘这一个倍数。
+    // 进入 2D 时定下的倍数保持不变。模型厚度保持压扁结果，只乘这一个倍数。
     void ApplyEnteredPerspectiveScale()
     {
         for (int i = 0; i < records.Count; i++)
@@ -299,8 +313,6 @@ public class ViewFlattenSystem
 
         Physics.SyncTransforms();
 
-        List<Record> movedBoxes = new List<Record>();
-
         for (int i = 0; i < records.Count; i++)
         {
             Record record = records[i];
@@ -313,13 +325,7 @@ public class ViewFlattenSystem
 
             if (record.kind == TargetKind.Player)
             {
-                RestorePlayer(record, state);
-                continue;
-            }
-
-            if (IsMovedBox(record, state))
-            {
-                movedBoxes.Add(record);
+                RestorePlayer(record);
                 continue;
             }
 
@@ -328,12 +334,8 @@ public class ViewFlattenSystem
 
         Physics.SyncTransforms();
 
-        for (int i = 0; i < movedBoxes.Count; i++)
-        {
-            RestoreMovedBox(movedBoxes[i], state);
-        }
-
-        view.GetComponent<ChangeTo3D>().SnapPlayerFrom2D(state);
+        // 落点用进 2D 之前记下的表面。箱子回到自己原来的位置，人站在上面就留在箱顶。
+        ApplySavedPlayerLanding(state);
         CharacterPerspectiveScaler scaler = view.GetComponent<CharacterPerspectiveScaler>();
         if (scaler != null)
         {
@@ -360,6 +362,7 @@ public class ViewFlattenSystem
 
         AddComponents(targets, Object.FindObjectsOfType<Box>());
         AddComponents(targets, Object.FindObjectsOfType<Key>());
+        AddComponents(targets, Object.FindObjectsOfType<PuzzleItem>());
         AddComponents(targets, Object.FindObjectsOfType<Door>());
         AddComponents(targets, Object.FindObjectsOfType<ItemGetAbility2DX>());
         AddComponents(targets, Object.FindObjectsOfType<ItemGetAbility2DZ>());
@@ -549,13 +552,32 @@ public class ViewFlattenSystem
             }
 
             Rect boxRect = ViewWorldBounds.ProjectToView(record.silhouetteBounds, state);
-            if (ViewWorldBounds.OverlapRatio(boxRect, playerRect) >= view.occlusionOverlapRatio)
+            if (ViewWorldBounds.OverlapRatio(boxRect, playerRect) < view.occlusionOverlapRatio)
             {
-                return true;
+                continue;
             }
+
+            // 站在楼梯厚度里允许切换。整段楼梯都比人更靠近镜头，才算被挡住。
+            if (isStair && !StairIsInFrontOfPlayer(record.silhouetteBounds, playerBounds, state))
+            {
+                continue;
+            }
+
+            return true;
         }
 
         return false;
+    }
+
+    // 2DX 镜头在 +X 朝 -X 看，更大的 X 更近。2DZ 镜头在 -Z 朝 +Z 看，更小的 Z 更近。
+    static bool StairIsInFrontOfPlayer(Bounds stair, Bounds player, View.State state)
+    {
+        if (state == View.State.Version2DX)
+        {
+            return stair.min.x > player.max.x;
+        }
+
+        return stair.max.z < player.min.z;
     }
 
     void PrepareEnterRecord(Record record, View.State state, float plane, Camera viewCamera)
@@ -601,12 +623,37 @@ public class ViewFlattenSystem
         // 玩家本来就站在压扁平面上，进入时不挪他的位置，只把子网格压薄。
         record.driveDepth = !playerBody;
 
+        if (record.kind == TargetKind.Stair)
+        {
+            // 压扁绕着包围盒中心收。楼梯沿被压扁的轴展开时，上一级会滑向中心。
+            // 人站在哪一级，就把这一级上的点钉在原地，其余部分朝人收拢。
+            if (holdPlayerOnStair && PlayerStandsInside(target))
+            {
+                record.holdAnchor = true;
+                record.anchorWorld = pinnedPlayerPosition;
+                record.anchorLocal = scaleRoot.InverseTransformPoint(record.anchorWorld);
+            }
+
+            // 镜头还没飞。只留每一级露在外面的踏面，被上一级盖住的实心体积先拆掉。
+            List<Bounds> treads = CaptureExposedStairTreads(target);
+            record.stairTreadsInstalled = AddStairStepColliders(scaleRoot, treads);
+            if (record.stairTreadsInstalled)
+            {
+                DisableChildColliders(record);
+                Physics.SyncTransforms();
+            }
+        }
+
         if (playerBody)
         {
             scaleRoot.localScale = Vector3.one;
             CapturePlayerDepthScales(record, state, worldScale);
             // 地面碰撞跟着缩放时会把人顶起来。先锁住高度，落地后再贴回地面。
             HoldPlayerHeight(record.rigidbody);
+            if (holdPlayerOnStair)
+            {
+                LockPlayerOnStair(record.rigidbody);
+            }
         }
     }
 
@@ -623,14 +670,16 @@ public class ViewFlattenSystem
         record.progressFromScale = record.scaleRoot.localScale;
         record.progressToScale = Vector3.one;
         record.progressFromDepth = AxisOf(record.transform.position, state);
-        if (playerBody || IsMovedBox(record, state))
+        if (playerBody)
         {
-            record.progressToDepth = state == View.State.Version2DX
-                ? ChangeTo3D.FindFloorAxisFrom2DX(record.transform.position)
-                : ChangeTo3D.FindFloorAxisFrom2DZ(record.transform.position);
+            Vector3 probe = record.transform.position;
+            float referenceY = probe.y + GetFootOffset(record.transform);
+            TryGetRestoredDepth(state, probe, referenceY, out float depth);
+            record.progressToDepth = depth;
         }
         else
         {
+            // 箱子和地面都回到进侧面之前的位置，不按平台中心重算。
             record.progressToDepth = AxisOf(record.worldPosition, state);
         }
 
@@ -716,13 +765,14 @@ public class ViewFlattenSystem
                 t);
         }
 
-        if (!record.driveDepth || record.transform == null)
+        if (record.driveDepth && record.transform != null)
         {
-            return;
+            float depth = Mathf.Lerp(record.progressFromDepth, record.progressToDepth, t);
+            MoveChildToDepth(record, depth);
         }
 
-        float depth = Mathf.Lerp(record.progressFromDepth, record.progressToDepth, t);
-        MoveChildToDepth(record, depth);
+        // 深度补完之后再钉一次。否则楼梯中心仍会把人所站的那一级带走。
+        KeepScaleAnchor(record);
     }
 
     // 先改缩放，再把物体上的深度轴补到目标值。缩放会带着子物体挪一点，所以深度要后写。
@@ -793,22 +843,47 @@ public class ViewFlattenSystem
             record.kind == TargetKind.Box ||
             record.kind == TargetKind.Player ||
             record.rigidbody != null ||
-            target.GetComponent<BalanceScale>() != null;
+            target.GetComponent<BalanceScale>() != null ||
+            target.GetComponent<Key>() != null ||
+            target.GetComponent<PuzzleItem>() != null;
 
         if (!keepOwnColliders)
         {
-            // 外形包围盒含草丛等装饰，比真实碰撞高。站立高度要用原碰撞的上下沿。
-            bool hasColliderHeight = TryGetSolidColliderHeight(target, out float minY, out float maxY);
-            DisableChildColliders(record);
-            AddSilhouetteCollider(
-                record.scaleRoot,
-                record.silhouetteBounds,
-                state,
-                record.flatWorldScale,
-                record.kind == TargetKind.Floor);
-            if (hasColliderHeight)
+            if (record.kind == TargetKind.Stair)
             {
-                FitColliderHeight(record.scaleRoot, minY, maxY);
+                // 踏面在镜头起飞前就已经换上。这里再补一次，避免中途没换成踏面时退回整块空气墙。
+                if (!record.stairTreadsInstalled)
+                {
+                    Physics.SyncTransforms();
+                    List<Bounds> steps = CaptureExposedStairTreads(target);
+                    DisableChildColliders(record);
+                    record.stairTreadsInstalled = AddStairStepColliders(record.scaleRoot, steps);
+                    if (!record.stairTreadsInstalled)
+                    {
+                        AddSilhouetteCollider(
+                            record.scaleRoot,
+                            record.silhouetteBounds,
+                            state,
+                            record.flatWorldScale,
+                            true);
+                    }
+                }
+            }
+            else
+            {
+                // 外形包围盒含草丛等装饰，比真实碰撞高。站立高度要用原碰撞的上下沿。
+                bool hasColliderHeight = TryGetSolidColliderHeight(target, out float minY, out float maxY);
+                DisableChildColliders(record);
+                AddSilhouetteCollider(
+                    record.scaleRoot,
+                    record.silhouetteBounds,
+                    state,
+                    record.flatWorldScale,
+                    record.kind == TargetKind.Floor);
+                if (hasColliderHeight)
+                {
+                    FitColliderHeight(record.scaleRoot, minY, maxY);
+                }
             }
         }
 
@@ -820,6 +895,11 @@ public class ViewFlattenSystem
         if (playerBody)
         {
             Vector3 velocity = WithAxis(body.velocity, state, 0f);
+            if (holdPlayerOnStair)
+            {
+                velocity = WithWalk(velocity, state, 0f);
+            }
+
             body.useGravity = true;
             body.isKinematic = false;
             body.velocity = velocity;
@@ -854,6 +934,159 @@ public class ViewFlattenSystem
         }
     }
 
+    void RememberStairStep()
+    {
+        holdPlayerOnStair = false;
+        Transform player = view.transform;
+        if (player == null)
+        {
+            return;
+        }
+
+        float footY = player.position.y + GetFootOffset(player);
+        Vector3 origin = player.position;
+        origin.y = footY + 0.4f;
+        RaycastHit[] hits = Physics.RaycastAll(
+            origin,
+            Vector3.down,
+            1.2f,
+            Physics.DefaultRaycastLayers,
+            QueryTriggerInteraction.Ignore);
+        float bestDistance = float.MaxValue;
+        bool found = false;
+        for (int i = 0; i < hits.Length; i++)
+        {
+            if (hits[i].collider == null || !BelongsToStair(hits[i].collider.transform))
+            {
+                continue;
+            }
+
+            if (hits[i].distance >= bestDistance)
+            {
+                continue;
+            }
+
+            bestDistance = hits[i].distance;
+            found = true;
+        }
+
+        if (!found)
+        {
+            Vector3 feet = player.position;
+            feet.y = footY + 0.05f;
+            Collider[] overlaps = Physics.OverlapSphere(
+                feet,
+                0.35f,
+                Physics.DefaultRaycastLayers,
+                QueryTriggerInteraction.Ignore);
+            for (int i = 0; i < overlaps.Length; i++)
+            {
+                if (overlaps[i] != null && BelongsToStair(overlaps[i].transform))
+                {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found)
+        {
+            return;
+        }
+
+        pinnedPlayerPosition = player.position;
+        holdPlayerOnStair = true;
+    }
+
+    bool PlayerStandsInside(Transform target)
+    {
+        if (target == null || view.transform == null)
+        {
+            return false;
+        }
+
+        Bounds bounds = ViewWorldBounds.Get(target);
+        Vector3 position = view.transform.position;
+        float footY = position.y + GetFootOffset(view.transform);
+        return position.x >= bounds.min.x - 0.3f &&
+               position.x <= bounds.max.x + 0.3f &&
+               position.z >= bounds.min.z - 0.3f &&
+               position.z <= bounds.max.z + 0.3f &&
+               footY >= bounds.min.y - 0.4f &&
+               footY <= bounds.max.y + 0.6f;
+    }
+
+    void KeepScaleAnchor(Record record)
+    {
+        if (!record.holdAnchor || record.scaleRoot == null)
+        {
+            return;
+        }
+
+        Vector3 current = record.scaleRoot.TransformPoint(record.anchorLocal);
+        Vector3 correction = record.anchorWorld - current;
+        if (correction.sqrMagnitude <= 0.0000001f)
+        {
+            return;
+        }
+
+        record.scaleRoot.position += correction;
+    }
+
+    void KeepPinnedPlayer()
+    {
+        if (!holdPlayerOnStair || !animatingEnter)
+        {
+            return;
+        }
+
+        Transform player = view.transform;
+        if (player == null)
+        {
+            return;
+        }
+
+        Rigidbody body = player.GetComponent<Rigidbody>();
+        if (body != null)
+        {
+            body.position = pinnedPlayerPosition;
+            body.velocity = Vector3.zero;
+        }
+
+        player.position = pinnedPlayerPosition;
+    }
+
+    static bool BelongsToStair(Transform source)
+    {
+        Transform current = source;
+        while (current != null)
+        {
+            if (current.name.IndexOf("stair", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+
+            current = current.parent;
+        }
+
+        return false;
+    }
+
+    void LockPlayerOnStair(Rigidbody body)
+    {
+        if (body == null)
+        {
+            return;
+        }
+
+        body.constraints |=
+            RigidbodyConstraints.FreezePositionX |
+            RigidbodyConstraints.FreezePositionY |
+            RigidbodyConstraints.FreezePositionZ;
+        body.velocity = Vector3.zero;
+        body.position = pinnedPlayerPosition;
+    }
+
     static void HoldPlayerHeight(Rigidbody body)
     {
         if (body == null)
@@ -871,8 +1104,6 @@ public class ViewFlattenSystem
     // 厚度留到后面，和镜头用同一步从扁变回立体。
     void PlacePlayerOnRestoredGround(View.State state)
     {
-        LockRestoredDepths(state);
-
         Record playerRecord = null;
         for (int i = 0; i < records.Count; i++)
         {
@@ -883,6 +1114,19 @@ public class ViewFlattenSystem
             }
         }
 
+        // 先看脚底下是不是箱子。箱子随后会回到原位，人要按记下的箱顶落下去。
+        bool onBox = false;
+        Record standingBox = null;
+        float walkOffset = 0f;
+        if (playerRecord != null && playerRecord.transform != null)
+        {
+            Vector3 probe = playerRecord.transform.position;
+            float footY = probe.y + GetFootOffset(playerRecord.transform);
+            onBox = TryFindBoxUnderFeet(state, probe, footY, out standingBox, out walkOffset);
+        }
+
+        LockRestoredDepths(state);
+
         if (playerRecord == null || playerRecord.transform == null)
         {
             Physics.SyncTransforms();
@@ -890,17 +1134,11 @@ public class ViewFlattenSystem
         }
 
         Transform player = playerRecord.transform;
-        Vector3 current = player.position;
-        float depth = AxisOf(current, state);
-        TryGetRestoredDepth(state, current, out depth);
-
-        Vector3 standing = WithAxis(current, state, depth);
         float footOffset = GetFootOffset(player);
-        float footY = current.y + footOffset;
-        if (TryGetRestoredSurfaceY(state, standing, footY, out float surfaceY))
-        {
-            standing.y = surfaceY - footOffset;
-        }
+        Vector3 standing = onBox && standingBox != null
+            ? LandingOnSavedBox(standingBox, state, walkOffset, footOffset)
+            : RestoredStandingPosition(player, state, player.position);
+        float depth = AxisOf(standing, state);
 
         Rigidbody body = playerRecord.rigidbody;
         if (body != null)
@@ -930,11 +1168,10 @@ public class ViewFlattenSystem
                 continue;
             }
 
-            if (record.kind == TargetKind.Box && IsMovedBox(record, state))
+            if (record.kind == TargetKind.Box && record.box != null && !record.box.IsHeld)
             {
-                float depth = AxisOf(record.transform.position, state);
-                TryGetRestoredDepth(state, record.transform.position, out depth);
-                record.progressToDepth = depth;
+                SnapBoxToSavedPosition(record, state);
+                continue;
             }
 
             record.progressFromDepth = record.progressToDepth;
@@ -948,6 +1185,12 @@ public class ViewFlattenSystem
         foreach (Floor floor in Floor.allFloors)
         {
             if (floor == null || !floor.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+
+            if (floor.name.IndexOf("stair", System.StringComparison.OrdinalIgnoreCase) >= 0 &&
+                AddStairRestoredSurfaces(floor.transform))
             {
                 continue;
             }
@@ -983,30 +1226,255 @@ public class ViewFlattenSystem
 
     bool TryGetRestoredDepth(View.State state, Vector3 worldPosition, out float depth)
     {
+        return TryGetRestoredDepth(state, worldPosition, worldPosition.y, out depth);
+    }
+
+    // 在包住走位那条轴的表面里，选离参考高度最近的一块，用它进 2D 之前的中心轴。
+    // 列表里靠后的一块不能把脚下这块盖掉。碰撞体被压到同一条左右线上时，也不能读那个中心。
+    bool TryGetRestoredDepth(
+        View.State state,
+        Vector3 worldPosition,
+        float referenceY,
+        out float depth)
+    {
         depth = AxisOf(worldPosition, state);
         bool found = false;
+        float bestDistance = float.MaxValue;
+        bool haveFallback = false;
+        float fallbackDistance = float.MaxValue;
+        float fallbackDepth = depth;
+
         for (int i = 0; i < restoredSurfaces.Count; i++)
         {
             RestoredSurface surface = restoredSurfaces[i];
-            if (!MatchesExitView(surface, state))
+            if (!MatchesExitView(surface, state) ||
+                !CoversWalkAxis(surface.bounds, state, worldPosition))
             {
                 continue;
             }
 
-            Bounds bounds = surface.bounds;
-            bool inside = state == View.State.Version2DX
-                ? worldPosition.z >= bounds.min.z && worldPosition.z <= bounds.max.z
-                : worldPosition.x >= bounds.min.x && worldPosition.x <= bounds.max.x;
-            if (!inside)
+            float top = surface.walkTop;
+            float candidate = state == View.State.Version2DX
+                ? surface.bounds.center.x
+                : surface.bounds.center.z;
+            float distance = Mathf.Abs(referenceY - top);
+            if (!haveFallback || distance < fallbackDistance)
+            {
+                haveFallback = true;
+                fallbackDistance = distance;
+                fallbackDepth = candidate;
+            }
+
+            if (top > referenceY + OverheadReject)
             {
                 continue;
             }
 
-            depth = state == View.State.Version2DX ? bounds.center.x : bounds.center.z;
+            if (found && distance >= bestDistance)
+            {
+                continue;
+            }
+
             found = true;
+            bestDistance = distance;
+            depth = candidate;
+        }
+
+        if (!found && haveFallback)
+        {
+            depth = fallbackDepth;
+            return true;
         }
 
         return found;
+    }
+
+    static bool CoversWalkAxis(Bounds bounds, View.State state, Vector3 worldPosition)
+    {
+        if (state == View.State.Version2DX)
+        {
+            return worldPosition.z >= bounds.min.z && worldPosition.z <= bounds.max.z;
+        }
+
+        return worldPosition.x >= bounds.min.x && worldPosition.x <= bounds.max.x;
+    }
+
+    // 脚在箱子顶上时，箱子比平台更近。用现在的前后范围判断，落点用进侧面之前记下的箱子。
+    bool TryFindBoxUnderFeet(
+        View.State state,
+        Vector3 playerPosition,
+        float footY,
+        out Record box,
+        out float walkOffset)
+    {
+        box = null;
+        walkOffset = 0f;
+        float bestDistance = float.MaxValue;
+
+        for (int i = 0; i < restoredSurfaces.Count; i++)
+        {
+            RestoredSurface surface = restoredSurfaces[i];
+            if (!MatchesExitView(surface, state) ||
+                !CoversWalkAxis(surface.bounds, state, playerPosition))
+            {
+                continue;
+            }
+
+            float top = surface.walkTop;
+            if (top > footY + OverheadReject)
+            {
+                continue;
+            }
+
+            float distance = Mathf.Abs(footY - top);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+            }
+        }
+
+        for (int i = 0; i < records.Count; i++)
+        {
+            Record record = records[i];
+            if (record.kind != TargetKind.Box || record.box == null || record.box.IsHeld)
+            {
+                continue;
+            }
+
+            Bounds current = CurrentBoxBounds(record);
+            if (!CoversWalkAxis(current, state, playerPosition))
+            {
+                continue;
+            }
+
+            float top = current.max.y;
+            if (top > footY + OverheadReject)
+            {
+                continue;
+            }
+
+            float distance = Mathf.Abs(footY - top);
+            if (distance > bestDistance)
+            {
+                continue;
+            }
+
+            bestDistance = distance;
+            box = record;
+            walkOffset = WalkOf(playerPosition, state) - WalkOf(current.center, state);
+        }
+
+        return box != null;
+    }
+
+    static Bounds CurrentBoxBounds(Record record)
+    {
+        Bounds bounds = record.supportBounds;
+        if (record.transform != null)
+        {
+            bounds.center += record.transform.position - record.worldPosition;
+        }
+
+        return bounds;
+    }
+
+    Vector3 LandingOnSavedBox(Record box, View.State state, float walkOffset, float footOffset)
+    {
+        Bounds saved = box.supportBounds;
+        float walk = WalkOf(saved.center, state) + walkOffset;
+        if (state == View.State.Version2DX)
+        {
+            walk = Mathf.Clamp(walk, saved.min.z, saved.max.z);
+        }
+        else
+        {
+            walk = Mathf.Clamp(walk, saved.min.x, saved.max.x);
+        }
+
+        Vector3 standing = saved.center;
+        standing.y = saved.max.y - footOffset;
+        return WithWalk(standing, state, walk);
+    }
+
+    // 视角切换不改箱子的位置，回到进侧面之前记下的坐标。
+    void SnapBoxToSavedPosition(Record record, View.State state)
+    {
+        if (record.scaleRoot == null || record.transform == null)
+        {
+            return;
+        }
+
+        Vector3 delta = record.worldPosition - record.transform.position;
+        record.scaleRoot.position += delta;
+        if (record.rigidbody != null)
+        {
+            record.rigidbody.position = record.transform.position;
+        }
+
+        float depth = AxisOf(record.worldPosition, state);
+        record.progressFromDepth = depth;
+        record.progressToDepth = depth;
+    }
+
+    Vector3 RestoredStandingPosition(Transform player, View.State state, Vector3 current)
+    {
+        float footOffset = GetFootOffset(player);
+        float footY = current.y + footOffset;
+        float depth = AxisOf(current, state);
+        TryGetRestoredDepth(state, current, footY, out depth);
+        Vector3 standing = WithAxis(current, state, depth);
+        if (TryGetRestoredSurfaceY(state, standing, footY, out float surfaceY))
+        {
+            standing.y = surfaceY - footOffset;
+        }
+
+        return standing;
+    }
+
+    void ApplySavedPlayerLanding(View.State state)
+    {
+        Record playerRecord = null;
+        for (int i = 0; i < records.Count; i++)
+        {
+            if (records[i].kind == TargetKind.Player)
+            {
+                playerRecord = records[i];
+                break;
+            }
+        }
+
+        if (playerRecord == null || playerRecord.transform == null)
+        {
+            return;
+        }
+
+        Transform player = playerRecord.transform;
+        Vector3 current = player.position;
+        float footOffset = GetFootOffset(player);
+        float footY = current.y + footOffset;
+        Vector3 standing;
+        if (TryFindBoxUnderFeet(state, current, footY, out Record standingBox, out float walkOffset))
+        {
+            standing = LandingOnSavedBox(standingBox, state, walkOffset, footOffset);
+        }
+        else
+        {
+            standing = RestoredStandingPosition(player, state, current);
+        }
+        Rigidbody body = playerRecord.rigidbody;
+        if (body != null)
+        {
+            body.position = standing;
+            Vector3 velocity = body.velocity;
+            velocity.y = 0f;
+            body.velocity = velocity;
+        }
+
+        player.position = standing;
+        float depth = AxisOf(standing, state);
+        playerRecord.progressFromDepth = depth;
+        playerRecord.progressToDepth = depth;
+        Physics.SyncTransforms();
     }
 
     bool TryGetRestoredSurfaceY(View.State state, Vector3 standing, float footY, out float surfaceY)
@@ -1034,7 +1502,7 @@ public class ViewFlattenSystem
                 continue;
             }
 
-            Bounds bounds = RestoredBoxBounds(record, state);
+            Bounds bounds = record.supportBounds;
             if (!ContainsHorizontal(bounds, standing))
             {
                 continue;
@@ -1044,22 +1512,6 @@ public class ViewFlattenSystem
         }
 
         return found;
-    }
-
-    Bounds RestoredBoxBounds(Record record, View.State state)
-    {
-        Vector3 pivot = record.worldPosition;
-        if (IsMovedBox(record, state))
-        {
-            pivot = record.transform.position;
-            float depth = AxisOf(pivot, state);
-            TryGetRestoredDepth(state, pivot, out depth);
-            pivot = WithAxis(pivot, state, depth);
-        }
-
-        Bounds bounds = record.supportBounds;
-        bounds.center += pivot - record.worldPosition;
-        return bounds;
     }
 
     static bool MatchesExitView(RestoredSurface surface, View.State state)
@@ -1086,7 +1538,7 @@ public class ViewFlattenSystem
         ref float bestDistance)
     {
         // 高出脚底太多的是头顶的面，不能拿来当落点。
-        if (top > footY + 0.35f)
+        if (top > footY + OverheadReject)
         {
             return;
         }
@@ -1337,6 +1789,25 @@ public class ViewFlattenSystem
         return value;
     }
 
+    static float WalkOf(Vector3 value, View.State state)
+    {
+        return state == View.State.Version2DX ? value.z : value.x;
+    }
+
+    static Vector3 WithWalk(Vector3 value, View.State state, float walk)
+    {
+        if (state == View.State.Version2DX)
+        {
+            value.z = walk;
+        }
+        else
+        {
+            value.x = walk;
+        }
+
+        return value;
+    }
+
     static void RestoreDepthScaledChildren(Record record)
     {
         for (int i = 0; i < record.depthScaledChildren.Count; i++)
@@ -1432,6 +1903,190 @@ public class ViewFlattenSystem
             collider.enabled = false;
             record.disabledColliders.Add(collider);
         }
+    }
+
+    static List<Bounds> CaptureSolidColliderBounds(Transform target)
+    {
+        List<Bounds> bounds = new List<Bounds>();
+        if (target == null)
+        {
+            return bounds;
+        }
+
+        Collider[] colliders = target.GetComponentsInChildren<Collider>();
+        for (int i = 0; i < colliders.Length; i++)
+        {
+            Collider collider = colliders[i];
+            if (collider == null || !collider.enabled || collider.isTrigger)
+            {
+                continue;
+            }
+
+            bounds.Add(collider.bounds);
+        }
+
+        return bounds;
+    }
+
+    // 每一级实心方块只留下没被更高一级盖住的踏面。盖住的后半截不再做碰撞。
+    static List<Bounds> CaptureExposedStairTreads(Transform stair)
+    {
+        List<Bounds> solids = CaptureSolidColliderBounds(stair);
+        List<Bounds> exposed = new List<Bounds>();
+        for (int i = 0; i < solids.Count; i++)
+        {
+            if (TryExposeStairTread(solids, i, out Bounds tread))
+            {
+                exposed.Add(tread);
+            }
+        }
+
+        return exposed;
+    }
+
+    static bool TryExposeStairTread(List<Bounds> solids, int index, out Bounds tread)
+    {
+        tread = solids[index];
+        for (int i = 0; i < solids.Count; i++)
+        {
+            if (i == index || solids[i].max.y <= tread.max.y + 0.01f)
+            {
+                continue;
+            }
+
+            if (!TrimCoveredFootprint(ref tread, solids[i]))
+            {
+                return false;
+            }
+        }
+
+        return tread.size.x > 0.05f && tread.size.y > 0.05f && tread.size.z > 0.05f;
+    }
+
+    // 更高一级若整段挡住左右或前后，就裁掉被挡住的那一侧，留下露出来的踏面。
+    static bool TrimCoveredFootprint(ref Bounds tread, Bounds cover)
+    {
+        const float gap = 0.02f;
+        float overlapMinX = Mathf.Max(tread.min.x, cover.min.x);
+        float overlapMaxX = Mathf.Min(tread.max.x, cover.max.x);
+        float overlapMinZ = Mathf.Max(tread.min.z, cover.min.z);
+        float overlapMaxZ = Mathf.Min(tread.max.z, cover.max.z);
+        if (overlapMaxX - overlapMinX <= gap || overlapMaxZ - overlapMinZ <= gap)
+        {
+            return true;
+        }
+
+        bool coversX = overlapMinX <= tread.min.x + gap && overlapMaxX >= tread.max.x - gap;
+        bool coversZ = overlapMinZ <= tread.min.z + gap && overlapMaxZ >= tread.max.z - gap;
+        if (coversX && coversZ)
+        {
+            return false;
+        }
+
+        if (coversX)
+        {
+            return KeepOpenSide(ref tread, axisZ: true, overlapMinZ, overlapMaxZ, gap);
+        }
+
+        if (coversZ)
+        {
+            return KeepOpenSide(ref tread, axisZ: false, overlapMinX, overlapMaxX, gap);
+        }
+
+        float takenX = (overlapMaxX - overlapMinX) / Mathf.Max(gap, tread.size.x);
+        float takenZ = (overlapMaxZ - overlapMinZ) / Mathf.Max(gap, tread.size.z);
+        if (takenZ >= takenX)
+        {
+            return KeepOpenSide(ref tread, axisZ: true, overlapMinZ, overlapMaxZ, gap);
+        }
+
+        return KeepOpenSide(ref tread, axisZ: false, overlapMinX, overlapMaxX, gap);
+    }
+
+    static bool KeepOpenSide(ref Bounds tread, bool axisZ, float cutMin, float cutMax, float gap)
+    {
+        Vector3 min = tread.min;
+        Vector3 max = tread.max;
+        int axis = axisZ ? 2 : 0;
+        float lowSide = cutMin - min[axis];
+        float highSide = max[axis] - cutMax;
+        if (lowSide >= highSide && lowSide > gap)
+        {
+            max[axis] = cutMin - gap;
+        }
+        else if (highSide > gap)
+        {
+            min[axis] = cutMax + gap;
+        }
+        else
+        {
+            return false;
+        }
+
+        if (max[axis] - min[axis] <= gap)
+        {
+            return false;
+        }
+
+        tread.SetMinMax(min, max);
+        return true;
+    }
+
+    // 踏面挂在不旋转的缩放节点上。深度轴跟着它变薄，高度和前后位置保持踏面原来的范围。
+    bool AddStairStepColliders(Transform scaleRoot, List<Bounds> steps)
+    {
+        if (scaleRoot == null || steps == null || steps.Count == 0)
+        {
+            return false;
+        }
+
+        Vector3 rootScale = scaleRoot.lossyScale;
+        float sx = Mathf.Max(0.0001f, Mathf.Abs(rootScale.x));
+        float sy = Mathf.Max(0.0001f, Mathf.Abs(rootScale.y));
+        float sz = Mathf.Max(0.0001f, Mathf.Abs(rootScale.z));
+        scaleRoot.gameObject.tag = "Ground";
+        int added = 0;
+
+        for (int i = 0; i < steps.Count; i++)
+        {
+            Bounds stepBounds = steps[i];
+            if (stepBounds.size.sqrMagnitude < 0.000001f)
+            {
+                continue;
+            }
+
+            BoxCollider step = scaleRoot.gameObject.AddComponent<BoxCollider>();
+            step.center = scaleRoot.InverseTransformPoint(stepBounds.center);
+            step.size = new Vector3(
+                stepBounds.size.x / sx,
+                stepBounds.size.y / sy,
+                stepBounds.size.z / sz);
+            added++;
+        }
+
+        return added > 0;
+    }
+
+    bool AddStairRestoredSurfaces(Transform stair)
+    {
+        if (stair == null)
+        {
+            return false;
+        }
+
+        List<Bounds> treads = CaptureExposedStairTreads(stair);
+        for (int i = 0; i < treads.Count; i++)
+        {
+            Bounds bounds = treads[i];
+            restoredSurfaces.Add(new RestoredSurface
+            {
+                bounds = bounds,
+                walkTop = bounds.max.y,
+                shadow = false
+            });
+        }
+
+        return treads.Count > 0;
     }
 
     void AddSilhouetteCollider(
@@ -1595,6 +2250,70 @@ public class ViewFlattenSystem
             : null;
     }
 
+    // 用进侧面时记下的深度判断谁更靠近镜头，用现在的投影判断箱子还盖不盖住物品。
+    public bool IsItemBlockedByBox(Transform item)
+    {
+        if (!flattened || item == null)
+        {
+            return false;
+        }
+
+        if (animState != View.State.Version2DX && animState != View.State.Version2DZ)
+        {
+            return false;
+        }
+
+        Bounds itemBounds = ViewWorldBounds.Get(item);
+        Rect itemRect = ViewWorldBounds.ProjectToView(itemBounds, animState);
+        float itemDepth = DepthBeforeFlatten(item, itemBounds);
+
+        for (int i = 0; i < records.Count; i++)
+        {
+            Record record = records[i];
+            if (record.kind != TargetKind.Box ||
+                record.box == null ||
+                record.box.IsHeld ||
+                !record.box.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+
+            float boxDepth = ViewWorldBounds.CloserDepthScore(record.silhouetteBounds, animState);
+            if (boxDepth <= itemDepth + DepthEpsilon)
+            {
+                continue;
+            }
+
+            Bounds boxBounds = ViewWorldBounds.GetSilhouette(record.box.transform);
+            Rect boxRect = ViewWorldBounds.ProjectToView(boxBounds, animState);
+            if (ViewWorldBounds.OverlapRatio(boxRect, itemRect) >= view.occlusionOverlapRatio)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    float DepthBeforeFlatten(Transform item, Bounds fallback)
+    {
+        for (int i = 0; i < records.Count; i++)
+        {
+            Record record = records[i];
+            if (record.transform == null)
+            {
+                continue;
+            }
+
+            if (record.transform == item || item.IsChildOf(record.transform))
+            {
+                return ViewWorldBounds.CloserDepthScore(record.silhouetteBounds, animState);
+            }
+        }
+
+        return ViewWorldBounds.CloserDepthScore(fallback, animState);
+    }
+
     void ApplyOcclusion(View.State state)
     {
         for (int i = 0; i < records.Count; i++)
@@ -1602,7 +2321,9 @@ public class ViewFlattenSystem
             Record target = records[i];
             if (target.transform == null ||
                 target.kind == TargetKind.Player ||
-                target.transform.GetComponent<ShadowPlatform>() != null)
+                target.transform.GetComponent<ShadowPlatform>() != null ||
+                target.transform.GetComponent<Key>() != null ||
+                target.transform.GetComponent<PuzzleItem>() != null)
             {
                 continue;
             }
@@ -1659,27 +2380,316 @@ public class ViewFlattenSystem
         }
     }
 
-    bool IsMovedBox(Record record, View.State state)
+    // 放下被遮挡关掉的箱子。只重新打开这一只，不切视角。
+    public void WakeDroppedBox(Box box)
     {
-        if (record.kind != TargetKind.Box || record.box == null || record.transform == null)
+        if (box == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < records.Count; i++)
+        {
+            Record record = records[i];
+            if (record.box != box)
+            {
+                continue;
+            }
+
+            record.deactivatedByOcclusion = false;
+            record.wasHeld = false;
+            record.rigidbodyKinematic = false;
+            RestoreDisabledColliders(record);
+
+            GameObject hideObject = record.scaleRoot != null
+                ? record.scaleRoot.gameObject
+                : box.gameObject;
+            if (hideObject != null && !hideObject.activeSelf)
+            {
+                hideObject.SetActive(true);
+            }
+
+            if (!box.gameObject.activeSelf)
+            {
+                box.gameObject.SetActive(true);
+            }
+
+            return;
+        }
+    }
+
+    // 压扁后的刚体缩放不均匀，薄薄的箱子对不齐同样被压薄的地面，松手就会穿下去。
+    // 放下时另做一块均匀缩放的碰撞，深度和脚下的地面齐平，所以能落在地上。
+    public bool TryDropFlattenedBox(
+        Box box,
+        Vector3 direction,
+        float forwardForce,
+        float upwardForce,
+        Collider playerCollider,
+        out Collider solidCollider)
+    {
+        solidCollider = null;
+        if (!flattened || box == null)
         {
             return false;
         }
 
-        if (record.box.IsHeld)
+        if (animState != View.State.Version2DX && animState != View.State.Version2DZ)
         {
             return false;
         }
 
-        Vector3 current = record.transform.position;
-        if (state == View.State.Version2DX)
+        Record record = FindBoxRecord(box);
+        if (record == null || record.scaleRoot == null)
         {
-            return Mathf.Abs(current.y - record.worldPosition.y) > MovedEpsilon ||
-                   Mathf.Abs(current.z - record.worldPosition.z) > MovedEpsilon;
+            return false;
         }
 
-        return Mathf.Abs(current.x - record.worldPosition.x) > MovedEpsilon ||
-               Mathf.Abs(current.y - record.worldPosition.y) > MovedEpsilon;
+        ReleaseDropBody(record, false);
+        Bounds visualBounds = GetVisibleBounds(record.scaleRoot);
+        if (visualBounds.size.sqrMagnitude < 0.0001f)
+        {
+            visualBounds = box.GetSolidBounds();
+        }
+
+        // 碰撞和模型用同一块范围。深度只把整块一起挪到地面上，模型和碰撞不会再分开。
+        Vector3 center = visualBounds.center;
+        if (TryFindDropSupport(visualBounds, record.scaleRoot, out Bounds support))
+        {
+            if (animState == View.State.Version2DX)
+            {
+                center.x = support.center.x;
+            }
+            else
+            {
+                center.z = support.center.z;
+            }
+        }
+
+        Vector3 size = visualBounds.size;
+        size.x = Mathf.Max(size.x, 0.05f);
+        size.y = Mathf.Max(size.y, 0.05f);
+        size.z = Mathf.Max(size.z, 0.05f);
+
+        box.SuspendRigidbody();
+        record.rigidbody = null;
+        box.SetSolidTrigger(true);
+        box.SetSolidColliderEnabled(true);
+
+        GameObject bodyObject = new GameObject(box.name + "_DropBody");
+        bodyObject.layer = box.gameObject.layer;
+        bodyObject.tag = "Ground";
+        bodyObject.transform.SetPositionAndRotation(visualBounds.center, Quaternion.identity);
+        bodyObject.transform.localScale = Vector3.one;
+
+        BoxCollider solid = bodyObject.AddComponent<BoxCollider>();
+        solid.center = Vector3.zero;
+        solid.size = size;
+        solidCollider = solid;
+
+        record.scaleRoot.SetParent(bodyObject.transform, true);
+        bodyObject.transform.position = center;
+
+        Rigidbody body = bodyObject.AddComponent<Rigidbody>();
+        body.mass = Mathf.Max(0.01f, box.weight);
+        body.drag = box.drag;
+        body.angularDrag = box.angularDrag;
+        body.useGravity = true;
+        body.isKinematic = false;
+        body.interpolation = RigidbodyInterpolation.Interpolate;
+        body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        body.constraints = animState == View.State.Version2DX
+            ? RigidbodyConstraints.FreezePositionX |
+              RigidbodyConstraints.FreezeRotationX |
+              RigidbodyConstraints.FreezeRotationY |
+              RigidbodyConstraints.FreezeRotationZ
+            : RigidbodyConstraints.FreezePositionZ |
+              RigidbodyConstraints.FreezeRotationX |
+              RigidbodyConstraints.FreezeRotationY |
+              RigidbodyConstraints.FreezeRotationZ;
+        body.velocity = direction * forwardForce + Vector3.up * upwardForce;
+        body.angularVelocity = Vector3.zero;
+        record.dropBodyRoot = bodyObject.transform;
+
+        if (playerCollider != null)
+        {
+            Physics.IgnoreCollision(solid, playerCollider, true);
+        }
+
+        Physics.SyncTransforms();
+        return true;
+    }
+
+    public void ReleaseFlattenedDropBody(Box box)
+    {
+        Record record = FindBoxRecord(box);
+        if (record == null)
+        {
+            return;
+        }
+
+        ReleaseDropBody(record, false);
+    }
+
+    void ReleaseAllDropBodies()
+    {
+        for (int i = 0; i < records.Count; i++)
+        {
+            ReleaseDropBody(records[i], true);
+        }
+    }
+
+    void ReleaseDropBody(Record record, bool enableSolid)
+    {
+        if (record.dropBodyRoot == null)
+        {
+            return;
+        }
+
+        Transform body = record.dropBodyRoot;
+        if (record.scaleRoot != null && record.scaleRoot.parent == body)
+        {
+            record.scaleRoot.SetParent(null, true);
+        }
+
+        record.dropBodyRoot = null;
+        UnityEngine.Object.Destroy(body.gameObject);
+
+        if (record.box != null)
+        {
+            record.rigidbody = record.box.ResumeRigidbody();
+            record.box.SetSolidTrigger(false);
+            record.box.SetSolidColliderEnabled(enableSolid);
+        }
+    }
+
+    static Bounds GetVisibleBounds(Transform root)
+    {
+        Bounds bounds = new Bounds();
+        bool any = false;
+        if (root == null)
+        {
+            return bounds;
+        }
+
+        Renderer[] renderers = root.GetComponentsInChildren<Renderer>();
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            Renderer renderer = renderers[i];
+            if (renderer == null || !renderer.enabled)
+            {
+                continue;
+            }
+
+            if (!any)
+            {
+                bounds = renderer.bounds;
+                any = true;
+            }
+            else
+            {
+                bounds.Encapsulate(renderer.bounds);
+            }
+        }
+
+        return bounds;
+    }
+
+    Record FindBoxRecord(Box box)
+    {
+        if (box == null)
+        {
+            return null;
+        }
+
+        for (int i = 0; i < records.Count; i++)
+        {
+            if (records[i].box == box)
+            {
+                return records[i];
+            }
+        }
+
+        return null;
+    }
+
+    bool TryFindDropSupport(Bounds itemBounds, Transform ignoreRoot, out Bounds support)
+    {
+        support = default;
+        if (view.transform == null)
+        {
+            return false;
+        }
+
+        float reach = DepthReach();
+        float bestDistance = float.MaxValue;
+        bool found = false;
+        const int steps = 7;
+        for (int step = 0; step < steps; step++)
+        {
+            float offset = Mathf.Lerp(-reach * 0.5f, reach * 0.5f, step / (float)(steps - 1));
+            Vector3 origin = itemBounds.center;
+            origin.y = itemBounds.min.y + 0.05f;
+            if (animState == View.State.Version2DX)
+            {
+                origin.x = view.transform.position.x + offset;
+            }
+            else
+            {
+                origin.z = view.transform.position.z + offset;
+            }
+
+            RaycastHit[] hits = Physics.RaycastAll(
+                origin,
+                Vector3.down,
+                40f,
+                Physics.DefaultRaycastLayers,
+                QueryTriggerInteraction.Ignore);
+            for (int i = 0; i < hits.Length; i++)
+            {
+                Collider collider = hits[i].collider;
+                if (collider == null || hits[i].normal.y < 0.45f)
+                {
+                    continue;
+                }
+
+                Transform hitTransform = collider.transform;
+                if (ignoreRoot != null &&
+                    (hitTransform == ignoreRoot || hitTransform.IsChildOf(ignoreRoot)))
+                {
+                    continue;
+                }
+
+                if (hitTransform == view.transform || hitTransform.IsChildOf(view.transform))
+                {
+                    continue;
+                }
+
+                if (hits[i].distance >= bestDistance)
+                {
+                    continue;
+                }
+
+                bestDistance = hits[i].distance;
+                support = collider.bounds;
+                found = true;
+            }
+        }
+
+        return found;
+    }
+
+    float DepthReach()
+    {
+        float reach = Mathf.Max(0.5f, view.flattenThickness);
+        Collider body = view.GetComponent<Collider>();
+        if (body == null)
+        {
+            return reach;
+        }
+
+        float axis = animState == View.State.Version2DX ? body.bounds.size.x : body.bounds.size.z;
+        return Mathf.Max(reach, axis + view.flattenThickness);
     }
 
     void RestoreExact(Record record)
@@ -1724,7 +2734,7 @@ public class ViewFlattenSystem
         }
     }
 
-    void RestorePlayer(Record record, View.State state)
+    void RestorePlayer(Record record)
     {
         Vector3 current = record.transform.position;
         // 先把模型挂回角色，再拆缩放父节点，否则模型会跟着父节点一起被删掉。
@@ -1737,50 +2747,6 @@ public class ViewFlattenSystem
         record.transform.localScale = record.localScale;
 
         Vector3 restored = current;
-        if (state == View.State.Version2DX)
-        {
-            restored.x = ChangeTo3D.FindFloorAxisFrom2DX(current);
-            restored.y = current.y;
-            restored.z = current.z;
-        }
-        else
-        {
-            restored.z = ChangeTo3D.FindFloorAxisFrom2DZ(current);
-            restored.x = current.x;
-            restored.y = current.y;
-        }
-
-        if (record.rigidbody != null)
-        {
-            record.rigidbody.position = restored;
-        }
-
-        record.transform.position = restored;
-        RestoreRigidbody(record, keepHeld: false);
-    }
-
-    void RestoreMovedBox(Record record, View.State state)
-    {
-        Vector3 current = record.transform.position;
-        TearDownScaleRoot(record);
-
-        record.transform.SetParent(record.originalParent, true);
-        record.transform.localRotation = record.localRotation;
-        record.transform.localScale = record.localScale;
-
-        Vector3 restored = current;
-        if (state == View.State.Version2DX)
-        {
-            restored.x = ChangeTo3D.FindFloorAxisFrom2DX(current);
-            restored.y = current.y;
-            restored.z = current.z;
-        }
-        else
-        {
-            restored.z = ChangeTo3D.FindFloorAxisFrom2DZ(current);
-            restored.x = current.x;
-            restored.y = current.y;
-        }
 
         if (record.rigidbody != null)
         {

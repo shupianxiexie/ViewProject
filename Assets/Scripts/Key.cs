@@ -8,13 +8,18 @@ public class Key : InteractableItem
     // Start is called before the first frame update
     void Start()
     {
-        doorGameObject.GetComponent<Door>().isLocked = true;
+        doorGameObject.GetComponentInChildren<Door>().isLocked = true;
     }
     public override void Interact()
     {
-        // Add your interaction logic here
+        View view = FindObjectOfType<View>();
+        if (view != null && view.IsItemBlockedByBox(transform))
+        {
+            return;
+        }
+
         //捡起来（未实现）
-        doorGameObject.GetComponent<Door>().isLocked = false;
+        doorGameObject.GetComponentInChildren<Door>().isLocked = false;
         Destroy(gameObject);
     }
 }

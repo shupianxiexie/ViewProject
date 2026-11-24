@@ -5,20 +5,14 @@ using UnityEngine;
 public class ItemGetAbility2DX : InteractableItem
 {
     public GameObject playergameObject;
-    // Start is called before the first frame update
-    void Start()
-    {
-        
-    }
+    public QRemind_UI qRemind;
+    public RRemind_UI rRemind;
 
-    // Update is called once per frame
-    void Update()
-    {
-        
-    }
     public override void Interact()
     {
         playergameObject.GetComponent<PlayerController>().turnTo2DX = true;
         Destroy(gameObject);
+        qRemind.ShowHint();
+        rRemind.HideHint();
     }
 }

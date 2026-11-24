@@ -115,19 +115,42 @@ public class PreviousPlatformTracker : MonoBehaviour
             return null;
         }
 
-        Floor floor = collider.GetComponentInParent<Floor>();
+        Transform fromParent = PlatformOn(collider.transform, includeChildren: false);
+        if (fromParent != null)
+        {
+            return fromParent;
+        }
+
+        // 2D 里能站的碰撞体挂在平台父节点上，Floor 在它的子级。
+        return PlatformOn(collider.transform, includeChildren: true);
+    }
+
+    static Transform PlatformOn(Transform source, bool includeChildren)
+    {
+        if (source == null)
+        {
+            return null;
+        }
+
+        Floor floor = includeChildren
+            ? source.GetComponentInChildren<Floor>()
+            : source.GetComponentInParent<Floor>();
         if (floor != null)
         {
             return floor.transform;
         }
 
-        Box box = collider.GetComponentInParent<Box>();
+        Box box = includeChildren
+            ? source.GetComponentInChildren<Box>()
+            : source.GetComponentInParent<Box>();
         if (box != null)
         {
             return box.transform;
         }
 
-        ShadowPlatform shadowPlatform = collider.GetComponentInParent<ShadowPlatform>();
+        ShadowPlatform shadowPlatform = includeChildren
+            ? source.GetComponentInChildren<ShadowPlatform>()
+            : source.GetComponentInParent<ShadowPlatform>();
         if (shadowPlatform != null)
         {
             return shadowPlatform.transform;

@@ -1,7 +1,6 @@
 using System.Collections;
 using UnityEngine;
 
-[RequireComponent(typeof(Rigidbody))]
 [RequireComponent(typeof(Collider))]
 [DefaultExecutionOrder(100)]
 public class Box : InteractableItem
@@ -185,11 +184,25 @@ public class Box : InteractableItem
         rotationBeforeHeld = transform.rotation;
         HeldBox = this;
 
+        if (view != null)
+        {
+            view.ReleaseFlattenedDropBody(this);
+        }
+
         ViewScaleRoot.GetRootOrSelf(transform).SetParent(null);
 
+        if (rb == null)
+        {
+            rb = ResumeRigidbody();
+        }
+
+        if (!rb.isKinematic)
+        {
+            rb.velocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+        }
+
         rb.isKinematic = true;
-        rb.velocity = Vector3.zero;
-        rb.angularVelocity = Vector3.zero;
         boxCollider.enabled = false;
 
         if (playerCollider != null)
@@ -207,11 +220,33 @@ public class Box : InteractableItem
             return;
         }
 
+        // 拿着箱子切视角时，箱子可能被整段关掉。先打开，再放到人面前。
+        WakeForPlacement();
+        UpdateHeldPosition();
+
         Vector3 releaseDirection = GetDropDirection();
+        HeldBox = null;
+
+        // 压扁后的箱子挂在非均匀缩放上，原来的碰撞对不齐地面，会直接掉下去。
+        if (view != null &&
+            view.TryDropFlattenedBox(
+                this,
+                releaseDirection,
+                dropForwardForce,
+                dropUpwardForce,
+                playerCollider,
+                out Collider solid))
+        {
+            if (playerCollider != null && solid != null)
+            {
+                StartCoroutine(ReenablePlayerCollision(playerCollider, solid));
+            }
+
+            return;
+        }
+
         Vector3 releasePosition = transform.position;
         Quaternion releaseRotation = rotationBeforeHeld;
-
-        HeldBox = null;
 
         Transform root = ViewScaleRoot.GetRootOrSelf(transform);
         root.SetParent(null);
@@ -222,9 +257,11 @@ public class Box : InteractableItem
 
         if (playerCollider != null)
         {
-            StartCoroutine(ReenablePlayerCollision(playerCollider));
+            StartCoroutine(ReenablePlayerCollision(playerCollider, boxCollider));
         }
 
+        rb.position = releasePosition;
+        rb.rotation = releaseRotation;
         rb.isKinematic = false;
         rb.useGravity = true;
         rb.constraints = GetDroppedConstraints();
@@ -238,6 +275,25 @@ public class Box : InteractableItem
         }
 
         Physics.SyncTransforms();
+    }
+
+    void WakeForPlacement()
+    {
+        if (view != null)
+        {
+            view.WakeDroppedBox(this);
+        }
+
+        Transform root = ViewScaleRoot.GetRootOrSelf(transform);
+        if (root != null && !root.gameObject.activeSelf)
+        {
+            root.gameObject.SetActive(true);
+        }
+
+        if (!gameObject.activeSelf)
+        {
+            gameObject.SetActive(true);
+        }
     }
 
     RigidbodyConstraints GetDroppedConstraints()
@@ -266,13 +322,72 @@ public class Box : InteractableItem
         return RigidbodyConstraints.None;
     }
 
-    IEnumerator ReenablePlayerCollision(Collider targetPlayerCollider)
+    public Bounds GetSolidBounds()
+    {
+        if (boxCollider == null)
+        {
+            return new Bounds(transform.position, Vector3.one);
+        }
+
+        bool wasEnabled = boxCollider.enabled;
+        boxCollider.enabled = true;
+        Physics.SyncTransforms();
+        Bounds bounds = boxCollider.bounds;
+        boxCollider.enabled = wasEnabled;
+        return bounds;
+    }
+
+    public void SetSolidColliderEnabled(bool enabled)
+    {
+        if (boxCollider != null)
+        {
+            boxCollider.enabled = enabled;
+        }
+    }
+
+    public void SetSolidTrigger(bool trigger)
+    {
+        if (boxCollider != null)
+        {
+            boxCollider.isTrigger = trigger;
+        }
+    }
+
+    // 放下时碰撞改挂到和模型重合的节点上，原来的刚体先拆掉，避免把它从模型上拽开。
+    public void SuspendRigidbody()
+    {
+        if (rb == null)
+        {
+            rb = GetComponent<Rigidbody>();
+        }
+
+        if (rb != null)
+        {
+            DestroyImmediate(rb);
+        }
+
+        rb = null;
+    }
+
+    public Rigidbody ResumeRigidbody()
+    {
+        rb = GetComponent<Rigidbody>();
+        if (rb == null)
+        {
+            rb = gameObject.AddComponent<Rigidbody>();
+        }
+
+        ConfigureRigidbody();
+        return rb;
+    }
+
+    IEnumerator ReenablePlayerCollision(Collider targetPlayerCollider, Collider solid)
     {
         yield return new WaitForSeconds(0.3f);
 
-        if (targetPlayerCollider != null && boxCollider != null)
+        if (targetPlayerCollider != null && solid != null)
         {
-            Physics.IgnoreCollision(boxCollider, targetPlayerCollider, false);
+            Physics.IgnoreCollision(solid, targetPlayerCollider, false);
         }
     }
 

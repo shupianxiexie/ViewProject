@@ -15,6 +15,7 @@ public class MainMenuController : MonoBehaviour
     CameraController cameraController;
     PlayerController playerController;
     bool isStarting;
+    public moveRemind_UI mRemind;
 
     void Awake()
     {
@@ -184,6 +185,7 @@ public class MainMenuController : MonoBehaviour
         if (playerController != null)
         {
             playerController.inputEnabled = true;
+            mRemind.ShowHint();
         }
     }
 

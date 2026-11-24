@@ -11,13 +11,32 @@ public class PuzzleItem : InteractableItem
     [Tooltip("碎片编号，必须和拼图面板中对应 PuzzlePiece 的 puzzleID 相同")]
     public int puzzleID;
 
+    bool collected;
+
     void OnTriggerEnter(Collider other)
     {
-        if (!other.CompareTag("Player"))
+        TryCollect(other);
+    }
+
+    void OnTriggerStay(Collider other)
+    {
+        TryCollect(other);
+    }
+
+    void TryCollect(Collider other)
+    {
+        if (collected || !other.CompareTag("Player"))
         {
             return;
         }
 
+        View view = other.GetComponentInParent<View>();
+        if (view != null && view.IsItemBlockedByBox(transform))
+        {
+            return;
+        }
+
+        collected = true;
         if (PuzzleManager.Instance != null)
         {
             PuzzleManager.Instance.CollectPuzzle(puzzleID);

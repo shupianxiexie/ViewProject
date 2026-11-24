@@ -1,9 +1,11 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// 挂在一整块平台上，或挂在由多块小平台组成的父物体上。
-/// 父物体不要加碰撞体，小平台上不要再挂这个脚本。
-/// X：靠近正方向变大。Z：远离正方向变大。
+/// 挂在一块触发区域上。同一物体上要有勾选 Is Trigger 的碰撞体，碰撞体的范围就是缩放范围。
+/// 只有角色在这块区域里切换进入 2D 的那一刻才定倍数，之后保持不变。
+/// 2DX 用 X：靠近正方向变大。2DZ 用 Z：远离正方向变大。
+/// 回到 3D 后恢复初始大小。
 /// </summary>
 [DisallowMultipleComponent]
 public class PerspectiveScalePlatform : MonoBehaviour
@@ -18,59 +20,174 @@ public class PerspectiveScalePlatform : MonoBehaviour
     public float maxScaleMultiplier = 2f;
 
     [Header("允许的轴")]
-    [Tooltip("进入 2DZ 后，靠近平台 X 正方向变大，远离变小。")]
+    [Tooltip("进入 2DX 时，靠近区域 X 正方向变大，远离变小。只在切入的那一刻计算一次。")]
     public bool allowScaleByX = true;
 
-    [Tooltip("进入 2DX 后，远离平台 Z 正方向变大，靠近变小。")]
+    [Tooltip("进入 2DZ 时，远离区域 Z 正方向变大，靠近变小。只在切入的那一刻计算一次。")]
     public bool allowScaleByZ = true;
 
-    bool hasLocalRange;
-    float localMinX;
-    float localMaxX;
-    float localMinZ;
-    float localMaxZ;
+    static readonly List<PerspectiveScalePlatform> allZones = new List<PerspectiveScalePlatform>();
 
-    private void Start()
+    readonly List<Collider> triggerColliders = new List<Collider>();
+    readonly List<CharacterPerspectiveScaler> occupants = new List<CharacterPerspectiveScaler>();
+    bool warnedMissingTrigger;
+    bool didInitialOverlap;
+
+    void Awake()
     {
-        CacheLocalRange();
+        CacheTriggers();
     }
 
-    private void OnValidate()
+    void OnEnable()
+    {
+        if (!allZones.Contains(this))
+        {
+            allZones.Add(this);
+        }
+    }
+
+    void Start()
+    {
+        CacheTriggers();
+        RegisterPlayersAlreadyInside();
+        didInitialOverlap = triggerColliders.Count > 0;
+    }
+
+    void LateUpdate()
+    {
+        CacheTriggers();
+        KeepTriggersEnabled();
+        if (!didInitialOverlap && triggerColliders.Count > 0)
+        {
+            RegisterPlayersAlreadyInside();
+            didInitialOverlap = true;
+        }
+    }
+
+    void OnDisable()
+    {
+        allZones.Remove(this);
+        for (int i = occupants.Count - 1; i >= 0; i--)
+        {
+            CharacterPerspectiveScaler scaler = occupants[i];
+            if (scaler != null)
+            {
+                scaler.ExitScaleZone(this);
+            }
+        }
+
+        occupants.Clear();
+    }
+
+    void OnTriggerEnter(Collider other)
+    {
+        TryAdmit(other);
+    }
+
+    void OnTriggerStay(Collider other)
+    {
+        TryAdmit(other);
+    }
+
+    void OnTriggerExit(Collider other)
+    {
+        if (other == null)
+        {
+            return;
+        }
+
+        CharacterPerspectiveScaler scaler = other.GetComponent<CharacterPerspectiveScaler>();
+        if (scaler == null || !occupants.Remove(scaler))
+        {
+            return;
+        }
+
+        scaler.ExitScaleZone(this);
+    }
+
+    void OnValidate()
     {
         minScaleMultiplier = Mathf.Max(0.01f, minScaleMultiplier);
         maxScaleMultiplier = Mathf.Max(minScaleMultiplier, maxScaleMultiplier);
     }
 
-    /// <summary>
-    /// 按整块平台在该轴上的范围计算倍数。
-    /// X 靠近正方向变大；Z 远离正方向变大。
-    /// </summary>
-    public bool TryGetMultiplier(
-        Vector3 worldPosition,
-        bool useXAxis,
-        Bounds fallbackBounds,
-        out float multiplier)
+    public bool AllowsAxis(bool useXAxis)
     {
-        multiplier = 1f;
+        return useXAxis ? allowScaleByX : allowScaleByZ;
+    }
 
-        if (useXAxis)
+    public static PerspectiveScalePlatform FindOverlapping(CharacterPerspectiveScaler scaler)
+    {
+        for (int i = allZones.Count - 1; i >= 0; i--)
         {
-            if (!allowScaleByX)
+            PerspectiveScalePlatform zone = allZones[i];
+            if (zone == null)
             {
-                return false;
+                allZones.RemoveAt(i);
+                continue;
+            }
+
+            if (zone.OverlapsCharacter(scaler))
+            {
+                return zone;
             }
         }
-        else if (!allowScaleByZ)
+
+        return null;
+    }
+
+    public bool OverlapsCharacter(CharacterPerspectiveScaler scaler)
+    {
+        if (scaler == null)
         {
             return false;
         }
 
-        if (!hasLocalRange)
+        Collider body = scaler.GetComponent<Collider>();
+        if (body == null)
         {
-            CacheLocalRange();
+            return false;
         }
 
-        if (!TryGetAxisRange(useXAxis, fallbackBounds, out float minimum, out float maximum))
+        if (triggerColliders.Count == 0)
+        {
+            CacheTriggers();
+        }
+
+        for (int i = 0; i < triggerColliders.Count; i++)
+        {
+            Collider[] hits = OverlapTrigger(triggerColliders[i]);
+            for (int h = 0; h < hits.Length; h++)
+            {
+                Collider hit = hits[h];
+                if (hit == null)
+                {
+                    continue;
+                }
+
+                if (hit == body || hit.GetComponent<CharacterPerspectiveScaler>() == scaler)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 按这块触发区域在该轴上的范围计算倍数。
+    /// X 靠近正方向变大；Z 远离正方向变大。
+    /// </summary>
+    public bool TryGetMultiplier(Vector3 worldPosition, bool useXAxis, out float multiplier)
+    {
+        multiplier = 1f;
+        if (!AllowsAxis(useXAxis))
+        {
+            return false;
+        }
+
+        if (!TryGetAxisRange(useXAxis, out float minimum, out float maximum))
         {
             return false;
         }
@@ -93,92 +210,189 @@ public class PerspectiveScalePlatform : MonoBehaviour
         return true;
     }
 
-    // 进游戏时记下子平台还开着的碰撞体。2D 里这些碰撞体会被关掉，不能再拿来量长度。
-    void CacheLocalRange()
+    void CacheTriggers()
     {
-        hasLocalRange = false;
-        localMinX = 0f;
-        localMaxX = 0f;
-        localMinZ = 0f;
-        localMaxZ = 0f;
-
-        Collider[] colliders = GetComponentsInChildren<Collider>(true);
+        triggerColliders.Clear();
+        Collider[] colliders = GetComponents<Collider>();
         for (int i = 0; i < colliders.Length; i++)
         {
             Collider collider = colliders[i];
-            if (!IsMeasurableCollider(collider))
+            if (collider != null && collider.isTrigger)
             {
-                continue;
+                triggerColliders.Add(collider);
             }
-
-            IncludeWorldBounds(collider.bounds);
         }
 
-        if (hasLocalRange)
+        if (triggerColliders.Count == 0 && !warnedMissingTrigger && Application.isPlaying)
+        {
+            warnedMissingTrigger = true;
+            Debug.LogWarning(
+                "缩放区域需要在同一个物体上添加 Collider，并勾选 Is Trigger。",
+                this);
+        }
+
+        if (triggerColliders.Count > 0)
+        {
+            warnedMissingTrigger = false;
+        }
+    }
+
+    // 进入 2D 时，压扁流程会关掉区域内的碰撞体。触发体要留着，人才能走进来。
+    void KeepTriggersEnabled()
+    {
+        for (int i = 0; i < triggerColliders.Count; i++)
+        {
+            Collider collider = triggerColliders[i];
+            if (collider != null && !collider.enabled)
+            {
+                collider.enabled = true;
+            }
+        }
+    }
+
+    void RegisterPlayersAlreadyInside()
+    {
+        for (int i = 0; i < triggerColliders.Count; i++)
+        {
+            Collider[] hits = OverlapTrigger(triggerColliders[i]);
+            for (int h = 0; h < hits.Length; h++)
+            {
+                TryAdmit(hits[h]);
+            }
+        }
+    }
+
+    void TryAdmit(Collider other)
+    {
+        if (other == null)
         {
             return;
         }
 
-        Renderer[] renderers = GetComponentsInChildren<Renderer>(true);
-        for (int i = 0; i < renderers.Length; i++)
+        CharacterPerspectiveScaler scaler = other.GetComponent<CharacterPerspectiveScaler>();
+        if (scaler == null || occupants.Contains(scaler))
         {
-            Renderer renderer = renderers[i];
-            if (renderer == null || renderer.bounds.size.sqrMagnitude <= 0.0001f)
+            return;
+        }
+
+        occupants.Add(scaler);
+        scaler.EnterScaleZone(this);
+    }
+
+    bool TryGetAxisRange(bool useXAxis, out float minimum, out float maximum)
+    {
+        minimum = 0f;
+        maximum = 0f;
+        bool found = false;
+        if (triggerColliders.Count == 0)
+        {
+            CacheTriggers();
+        }
+
+        for (int i = 0; i < triggerColliders.Count; i++)
+        {
+            Collider collider = triggerColliders[i];
+            if (collider == null)
             {
                 continue;
             }
 
-            IncludeWorldBounds(renderer.bounds);
+            IncludeCollider(collider, useXAxis, ref found, ref minimum, ref maximum);
         }
+
+        return found && maximum - minimum > Mathf.Epsilon;
     }
 
-    bool TryGetAxisRange(bool useXAxis, Bounds fallbackBounds, out float minimum, out float maximum)
+    void IncludeCollider(
+        Collider collider,
+        bool useXAxis,
+        ref bool found,
+        ref float minimum,
+        ref float maximum)
     {
-        if (hasLocalRange)
+        BoxCollider box = collider as BoxCollider;
+        if (box != null)
         {
-            minimum = useXAxis ? localMinX : localMinZ;
-            maximum = useXAxis ? localMaxX : localMaxZ;
-            return maximum - minimum > Mathf.Epsilon;
+            Vector3 center = box.center;
+            Vector3 extents = box.size * 0.5f;
+            float minValue = useXAxis ? center.x - extents.x : center.z - extents.z;
+            float maxValue = useXAxis ? center.x + extents.x : center.z + extents.z;
+            IncludeValue(minValue, ref found, ref minimum, ref maximum);
+            IncludeValue(maxValue, ref found, ref minimum, ref maximum);
+            return;
         }
 
-        IncludeWorldBounds(fallbackBounds);
-        minimum = useXAxis ? localMinX : localMinZ;
-        maximum = useXAxis ? localMaxX : localMaxZ;
-        return hasLocalRange && maximum - minimum > Mathf.Epsilon;
-    }
-
-    static bool IsMeasurableCollider(Collider collider)
-    {
-        return collider != null &&
-               collider.enabled &&
-               !collider.isTrigger &&
-               collider.GetComponent<ViewScaleRoot>() == null &&
-               collider.bounds.size.sqrMagnitude > 0.0001f;
-    }
-
-    void IncludeWorldBounds(Bounds worldBounds)
-    {
-        Vector3 center = worldBounds.center;
-        Vector3 extents = worldBounds.extents;
+        Bounds worldBounds = collider.bounds;
+        Vector3 worldCenter = worldBounds.center;
+        Vector3 worldExtents = worldBounds.extents;
         for (int i = 0; i < 8; i++)
         {
-            Vector3 corner = center + new Vector3(
-                (i & 1) == 0 ? -extents.x : extents.x,
-                (i & 2) == 0 ? -extents.y : extents.y,
-                (i & 4) == 0 ? -extents.z : extents.z);
+            Vector3 corner = worldCenter + new Vector3(
+                (i & 1) == 0 ? -worldExtents.x : worldExtents.x,
+                (i & 2) == 0 ? -worldExtents.y : worldExtents.y,
+                (i & 4) == 0 ? -worldExtents.z : worldExtents.z);
             Vector3 local = transform.InverseTransformPoint(corner);
-            if (!hasLocalRange)
+            IncludeValue(useXAxis ? local.x : local.z, ref found, ref minimum, ref maximum);
+        }
+    }
+
+    static void IncludeValue(
+        float value,
+        ref bool found,
+        ref float minimum,
+        ref float maximum)
+    {
+        if (!found)
+        {
+            minimum = value;
+            maximum = value;
+            found = true;
+            return;
+        }
+
+        minimum = Mathf.Min(minimum, value);
+        maximum = Mathf.Max(maximum, value);
+    }
+
+    static Collider[] OverlapTrigger(Collider trigger)
+    {
+        if (trigger == null)
+        {
+            return new Collider[0];
+        }
+
+        BoxCollider box = trigger as BoxCollider;
+        if (box != null)
+        {
+            Vector3 lossy = box.transform.lossyScale;
+            Vector3 half = new Vector3(
+                Mathf.Abs(box.size.x * lossy.x) * 0.5f,
+                Mathf.Abs(box.size.y * lossy.y) * 0.5f,
+                Mathf.Abs(box.size.z * lossy.z) * 0.5f);
+            if (half.sqrMagnitude <= Mathf.Epsilon)
             {
-                localMinX = localMaxX = local.x;
-                localMinZ = localMaxZ = local.z;
-                hasLocalRange = true;
-                continue;
+                return new Collider[0];
             }
 
-            localMinX = Mathf.Min(localMinX, local.x);
-            localMaxX = Mathf.Max(localMaxX, local.x);
-            localMinZ = Mathf.Min(localMinZ, local.z);
-            localMaxZ = Mathf.Max(localMaxZ, local.z);
+            return Physics.OverlapBox(
+                box.transform.TransformPoint(box.center),
+                half,
+                box.transform.rotation,
+                Physics.DefaultRaycastLayers,
+                QueryTriggerInteraction.Ignore);
         }
+
+        Bounds bounds = trigger.bounds;
+        if (bounds.extents.sqrMagnitude <= Mathf.Epsilon)
+        {
+            return new Collider[0];
+        }
+
+        return Physics.OverlapBox(
+            bounds.center,
+            bounds.extents,
+            Quaternion.identity,
+            Physics.DefaultRaycastLayers,
+            QueryTriggerInteraction.Ignore);
     }
 }
